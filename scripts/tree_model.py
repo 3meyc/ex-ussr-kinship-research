@@ -187,7 +187,7 @@ def _clean_row(row: Mapping[str, str]) -> dict[str, str]:
 
 
 def _node(row: Mapping[str, str], *, hidden: bool) -> Node:
-    person_id = row.get("person_id", "")
+    person_id = row["person_id"]
     if hidden:
         return Node(person_id, person_id, "", True, (("person_id", person_id),))
     return Node(person_id, _label(row), _years(row), False, _pick(row, _PERSON_FIELDS))
@@ -196,7 +196,7 @@ def _node(row: Mapping[str, str], *, hidden: bool) -> Node:
 def _label(row: Mapping[str, str]) -> str:
     """preferred_label, иначе первое из names_as_written (через «;»), иначе person_id."""
     first_written = row.get("names_as_written", "").split(";")[0].strip()
-    return row.get("preferred_label", "") or first_written or row.get("person_id", "")
+    return row.get("preferred_label", "") or first_written or row["person_id"]
 
 
 def _years(row: Mapping[str, str]) -> str:
@@ -206,7 +206,7 @@ def _years(row: Mapping[str, str]) -> str:
 
 
 def _edge(row: Mapping[str, str], *, shareable: bool, hidden_ids: frozenset[str]) -> Edge:
-    relationship_id = row.get("relationship_id", "")
+    relationship_id = row["relationship_id"]
     relationship_type = row.get("relationship_type", "")
     a, b = row.get("person_a_id", ""), row.get("person_b_id", "")
     status = row.get("status", "")

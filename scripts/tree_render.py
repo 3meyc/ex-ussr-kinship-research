@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from itertools import accumulate
 from typing import TYPE_CHECKING
 
-from tree_geometry import CHAR_EM, LABEL_SIZE, NODE_HEIGHT, NODE_WIDTH, node_box, route
+from tree_geometry import LABEL_SIZE, NODE_HEIGHT, NODE_WIDTH, char_em, node_box, route
 from tree_model import DIRECTED_TYPES, STATUSES
 
 if TYPE_CHECKING:
@@ -54,16 +54,9 @@ _ENCODINGS = {
     "unresolved": _Encoding("#888888", 1.5, "", "solid", "grey", "-->", "---", "не решена или статус не указан"),
     "contradicted": _Encoding("#c62828", 1.5, "", "solid", "red", "-->", "---", "противоречит источникам"),
 }
-_ARROW_NOTE = (
-    "Стрелка идёт от person_a к person_b у "
-    + " и ".join(filter(None, (", ".join(DIRECTED_TYPES[:-1]), DIRECTED_TYPES[-1])))
-    + "."
-)
+_ARROW_NOTE = f"Стрелка идёт от person_a к person_b у {', '.join(DIRECTED_TYPES[:-1])} и {DIRECTED_TYPES[-1]}."
 
 _NODE_PADDING = 6  # поле слева и справа от текста в узле
-# Заглавные и эти строчные в sans-serif шире CHAR_EM: строка из них не помещается при той же длине.
-_WIDE_EM = 0.75
-_WIDE_LOWERCASE = frozenset("жмшщыюmw")
 
 
 def banner(graph: Graph) -> str:
@@ -160,18 +153,13 @@ def _svg_node(node: Node, centre: Point) -> str:
 
 
 def _fit(text: str, size: int) -> str:
-    """Строка узла; не помещается между полями — обрезана и кончается «…» (ширина — _char_em)."""
+    """Строка узла; не помещается между полями — обрезана и кончается «…» (ширина — char_em)."""
     room = (NODE_WIDTH - 2 * _NODE_PADDING) / size  # в долях кегля
-    ends = list(accumulate(_char_em(char) for char in text))
+    ends = list(accumulate(char_em(char) for char in text))
     if not ends or ends[-1] <= room:
         return text
-    kept = sum(1 for end in ends if end <= room - _char_em("…"))
+    kept = sum(1 for end in ends if end <= room - char_em("…"))
     return text[:kept] + "…"
-
-
-def _char_em(char: str) -> float:
-    """Оценка ширины знака в долях кегля: заглавные и широкие строчные шире прочих."""
-    return _WIDE_EM if char.isupper() or char in _WIDE_LOWERCASE else CHAR_EM
 
 
 def _num(value: float) -> str:

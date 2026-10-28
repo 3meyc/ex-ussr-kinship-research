@@ -17,6 +17,7 @@ import bisect
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from functools import cached_property
 from types import MappingProxyType
 from typing import TYPE_CHECKING
 
@@ -32,6 +33,9 @@ NODE_WIDTH = 160
 NODE_HEIGHT = 48
 LABEL_SIZE = 10
 CHAR_EM = 0.6  # ширина знака с запасом, в долях кегля (sans-serif)
+# Заглавные и эти строчные в sans-serif шире CHAR_EM: строка из них не помещается при той же длине.
+_WIDE_EM = 0.75
+_WIDE_LOWERCASE = frozenset("жмшщыюmw")
 
 _HALF_HEIGHT = NODE_HEIGHT // 2
 _LANE = 12  # шаг портов на стороне узла и наименьший зазор между параллельными участками путей
@@ -61,6 +65,11 @@ class Routes:
     positions: Mapping[str, Point]  # person_id → центр узла после раздвигания строк
     width: int
     height: int
+
+
+def char_em(char: str) -> float:
+    """Оценка ширины знака в долях кегля: заглавные и широкие строчные шире прочих."""
+    return _WIDE_EM if char.isupper() or char in _WIDE_LOWERCASE else CHAR_EM
 
 
 def node_box(centre: Point) -> Box:
@@ -94,7 +103,7 @@ def route(graph: Graph, layout: Layout) -> Routes:
     label_boxes: list[Box] = []
     edges = []
     for edge, line in zip(graph.edges, lines):
-        anchors = [_on_canvas(edge.label, anchor, width, height) for anchor in _label_anchors(line)]
+        anchors = _on_canvas(edge.label, _label_anchors(line), width, height)
         anchor = _label_anchor(edge.label, anchors, node_boxes, label_boxes)
         label_boxes.append(_label_box(edge.label, anchor))
         edges.append(EdgeRoute(_commands(line), anchor))
@@ -252,10 +261,9 @@ def _ports(
     sides: dict[tuple[str, str], list[tuple[tuple[int, int], int, int]]] = {}
     for index, bundle in enumerate(bundles):
         for end, side in enumerate(bundle.sides):
-            own, other = (bundle.first, bundle.last) if end == 0 else (bundle.last, bundle.first)
-            if bundle.is_arc:
-                rightward = grid.xs[other] > grid.xs[own] or (grid.xs[other] == grid.xs[own] and end == 0)
-                key = (2 if rightward else 0, -grid.xs[other])
+            other = bundle.last if end == 0 else bundle.first
+            if bundle.is_arc:  # first — левое лицо, его дуга уходит вправо
+                key = (2 if end == 0 else 0, -grid.xs[other])
             else:
                 path = (grid.xs[bundle.first], *channels[index], grid.xs[bundle.last])
                 key = (1, path[1] if end == 0 else path[-2])
@@ -276,8 +284,8 @@ def _ports(
             starts = _phase_starts(centre, counts, _PHASE[side], row_channels.get(row, ()))
         else:
             starts = _packed_starts(centre, counts, steps, gap)
-        for (_, index, end), start, count, step in zip(entries, starts, counts, steps):
-            ports[index, end] = start + (count - 1) * step // 2
+        for (_, index, end), start in zip(entries, starts):
+            ports[index, end] = start + half[index]
     return ports
 
 
@@ -346,11 +354,11 @@ class _Piece:
     def is_arc(self) -> bool:
         return not self.top
 
-    @property
+    @cached_property
     def left(self) -> int:
         return min(self.top + self.bottom)
 
-    @property
+    @cached_property
     def right(self) -> int:
         return max(self.top + self.bottom)
 
@@ -416,36 +424,42 @@ def _stack(pieces: Sequence[_Piece], height: int) -> tuple[list[int], int]:
 def _stack_wires(wires: Sequence[_Piece]) -> list[int]:
     """Высота каждой связи от верха промежутка: самая верхняя свободная. Связь, чья верхняя нога
     стоит на x нижней ноги другой, кладётся раньше и выше неё."""
-    above = [{other for other, wire in enumerate(wires) if _near(wire.top, below.bottom)} for below in wires]
+    # above[i] — связи, чья верхняя нога стоит на x нижней ноги связи i (сама i не входит).
+    above = [
+        {other for other, wire in enumerate(wires) if other != index and _near(wire.top, below.bottom)}
+        for index, below in enumerate(wires)
+    ]
     ys: dict[int, int] = {}
     pending = set(range(len(wires)))
     while pending:
-        ready = [index for index in pending if not above[index] & pending - {index}] or list(pending)
+        ready = [index for index in pending if above[index].isdisjoint(pending)] or list(pending)
         index = min(ready, key=lambda index: (-wires[index].span, wires[index].bundle))
         pending.remove(index)
-        ys[index] = _free_height(wires, index, ys)
+        ys[index] = _free_height(wires, index, ys, above)
     return [ys[index] for index in range(len(wires))]
 
 
-def _free_height(wires: Sequence[_Piece], index: int, ys: Mapping[int, int]) -> int:
+def _free_height(wires: Sequence[_Piece], index: int, ys: Mapping[int, int], above: Sequence[set[int]]) -> int:
     wire = wires[index]
     candidates = sorted({_LANE + wire.half, *(y + wires[other].half + _LANE + wire.half for other, y in ys.items())})
+    # Для каждой уложенной связи: её высота, наименьший зазор, общий ли отрезок x, стоит ли её нога над
+    # ногой этой связи и наоборот.
+    placed = [
+        (y, _LANE + wire.half + wires[other].half, _overlap(wire, wires[other]), other in above[index], index in above[other])
+        for other, y in ys.items()
+    ]
 
     def fits(y: int, *, keep_order: bool) -> bool:
-        for other, other_y in ys.items():
-            placed = wires[other]
-            room = _LANE + wire.half + placed.half
-            if _overlap(wire, placed) and abs(y - other_y) < room:
-                return False
-            if _near(placed.top, wire.bottom) and y - other_y < room:
-                return False
-            if keep_order and _near(wire.top, placed.bottom) and other_y - y < room:
-                return False
-        return True
+        return not any(
+            (overlap and abs(y - other_y) < room)
+            or (over and y - other_y < room)
+            or (keep_order and under and other_y - y < room)
+            for other_y, room, overlap, over, under in placed
+        )
 
-    in_order = [y for y in candidates if fits(y, keep_order=True)]
-    if in_order:
-        return in_order[0]
+    in_order = next((y for y in candidates if fits(y, keep_order=True)), None)
+    if in_order is not None:
+        return in_order
     # Порядок нарушается, только если две связи меняются местами (нога каждой стоит под ногой другой);
     # самая нижняя высота свободна всегда.
     return next(y for y in candidates if fits(y, keep_order=False))
@@ -457,13 +471,9 @@ def _stack_arcs(arcs: Sequence[_Piece]) -> list[int]:
     for index in sorted(range(len(arcs)), key=lambda index: (arcs[index].span, arcs[index].bundle)):
         arc = arcs[index]
         candidates = sorted({_ARC_RISE + arc.half, *(rise + arcs[other].half + _LANE + arc.half for other, rise in rises.items())})
+        crossing = [(rise, _LANE + arc.half + arcs[other].half) for other, rise in rises.items() if _overlap(arc, arcs[other])]
         rises[index] = next(
-            rise
-            for rise in candidates
-            if not any(
-                _overlap(arc, arcs[other]) and abs(rise - other_rise) < _LANE + arc.half + arcs[other].half
-                for other, other_rise in rises.items()
-            )
+            rise for rise in candidates if not any(abs(rise - other_rise) < room for other_rise, room in crossing)
         )
     return [rises[index] for index in range(len(arcs))]
 
@@ -506,8 +516,7 @@ def _offset(points: Sequence[Point], distance: int) -> list[Point]:
     с разными distance не сходятся и не пересекаются."""
     normals = []
     for (x1, y1), (x2, y2) in zip(points, points[1:]):
-        dx, dy = (x2 > x1) - (x2 < x1), (y2 > y1) - (y2 < y1)
-        normals.append((-dy, dx))
+        normals.append((-_sign(y2 - y1), _sign(x2 - x1)))
     shifted = []
     for index, (x, y) in enumerate(points):
         around = normals[max(index - 1, 0) : index + 1]
@@ -534,10 +543,11 @@ def _length(first: Point, second: Point) -> int:
 
 def _toward(start: Point, end: Point, distance: int) -> Point:
     """Точка отрезка от start к end (отвесного или горизонтального) на distance от start."""
-    return (
-        start[0] + distance * ((end[0] > start[0]) - (end[0] < start[0])),
-        start[1] + distance * ((end[1] > start[1]) - (end[1] < start[1])),
-    )
+    return start[0] + distance * _sign(end[0] - start[0]), start[1] + distance * _sign(end[1] - start[1])
+
+
+def _sign(value: int) -> int:
+    return (value > 0) - (value < 0)
 
 
 # --- Подписи ------------------------------------------------------------------------------------
@@ -547,8 +557,8 @@ def _label_anchors(points: Sequence[Point]) -> list[Point]:
     """Места подписи в порядке предпочтения: точки на долях _LABEL_STEPS длины пути (целые x и
     базовая линия; базовая линия ниже точки на 0,4 кегля, так строка встаёт на путь серединой)."""
     lengths = [0.0]
-    for (x1, y1), (x2, y2) in zip(points, points[1:]):
-        lengths.append(lengths[-1] + math.hypot(x2 - x1, y2 - y1))
+    for before, after in zip(points, points[1:]):
+        lengths.append(lengths[-1] + _length(before, after))
     anchors = []
     for fraction in _LABEL_STEPS:
         distance = fraction * lengths[-1]
@@ -561,8 +571,7 @@ def _label_anchors(points: Sequence[Point]) -> list[Point]:
 
 
 def _label_anchor(label: str, anchors: Sequence[Point], node_boxes: Sequence[Box], label_boxes: Sequence[Box]) -> Point:
-    """Первая точка, где подпись не задевает узлы, а среди них — прежние подписи; если такой нет —
-    с наименьшим числом задетых узлов, затем подписей."""
+    """Первая точка с наименьшим числом задетых подписью узлов, затем прежних подписей."""
 
     def hits(anchor: Point) -> tuple[int, int]:
         box = _label_box(label, anchor)
@@ -571,28 +580,27 @@ def _label_anchor(label: str, anchors: Sequence[Point], node_boxes: Sequence[Box
             sum(_boxes_overlap(box, other) for other in label_boxes),
         )
 
-    for anchor in anchors:
-        if hits(anchor) == (0, 0):
-            return anchor
     return min(anchors, key=hits)
 
 
 def _label_box(label: str, anchor: Point) -> Box:
     """Рамка подписи по центру anchor (x, базовая линия) с зазором."""
     x, baseline = anchor
-    half = len(label) * LABEL_SIZE * CHAR_EM / 2 + _LABEL_GAP
+    half = sum(map(char_em, label)) * LABEL_SIZE / 2 + _LABEL_GAP
     return (x - half, baseline - LABEL_SIZE - _LABEL_GAP, x + half, baseline + LABEL_SIZE * 0.3 + _LABEL_GAP)
 
 
-def _on_canvas(label: str, anchor: Point, width: int, height: int) -> Point:
-    """anchor, сдвинутый так, чтобы рамка подписи (_label_box) лежала на холсте; подпись шире
+def _on_canvas(label: str, anchors: Sequence[Point], width: int, height: int) -> list[Point]:
+    """anchors, сдвинутые так, чтобы рамка подписи (_label_box) лежала на холсте; подпись шире
     холста стоит по его середине."""
     left, top, right, bottom = _label_box(label, (0, 0))
     x_low, x_high = math.ceil(-left), math.floor(width - right)
     y_low, y_high = math.ceil(-top), math.floor(height - bottom)
-    x = min(max(anchor[0], x_low), x_high) if x_low <= x_high else round(width / 2)
-    y = min(max(anchor[1], y_low), y_high) if y_low <= y_high else round(height / 2)
-    return x, y
+
+    def clamp(value: int, low: int, high: int, size: int) -> int:
+        return min(max(value, low), high) if low <= high else round(size / 2)
+
+    return [(clamp(x, x_low, x_high, width), clamp(y, y_low, y_high, height)) for x, y in anchors]
 
 
 def _boxes_overlap(first: Box, second: Box) -> bool:

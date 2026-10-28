@@ -101,18 +101,31 @@ def _report_audit_errors(errors: Sequence[str], case_dir: Path) -> None:
 
 
 def _report_id_conflicts(error: IdConflictError) -> None:
-    """Заголовок с числом id из ошибки, затем каждая группа id, слитых или опустошённых очисткой, —
-    одной строкой; id в записи Python (repr), чтобы управляющие знаки было видно в терминале."""
+    """Заголовок с числом id из ошибки, затем первые _ERRORS_SHOWN групп id, слитых или опустошённых
+    очисткой, — по одной строке, и сколько групп не показано; id в записи Python (repr), чтобы
+    управляющие знаки было видно в терминале."""
     print(f"Граф не построен: {error}.", file=sys.stderr)
     for conflict in error.conflicts[:_ERRORS_SHOWN]:
         raw_ids = ", ".join(f"{raw_id!r}" for raw_id in conflict.raw_ids)
         result = f"{conflict.cleaned!r}" if conflict.cleaned else "пусто"
         print(f"- {conflict.column} {raw_ids}: после очистки {result}", file=sys.stderr)
+    more = len(error.conflicts) - _ERRORS_SHOWN
+    if more > 0:
+        print(f"- ещё {more} {_groups_ru(more)}", file=sys.stderr)
     print(
         "Такие id различаются только управляющими знаками, пробелами по краям или формой Юникода; "
         "исправьте их в реестрах.",
         file=sys.stderr,
     )
+
+
+def _groups_ru(count: int) -> str:
+    """Слово «группа» в форме для числа count."""
+    if count % 10 == 1 and count % 100 != 11:
+        return "группа"
+    if count % 10 in (2, 3, 4) and count % 100 not in (12, 13, 14):
+        return "группы"
+    return "групп"
 
 
 def _build_graph(registers: Mapping[str, Register], *, shareable: bool) -> Graph:

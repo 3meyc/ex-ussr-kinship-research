@@ -73,17 +73,24 @@ class EdgeGeometryTest(unittest.TestCase):
         self.assertTrue(all(lower - upper >= 12 for upper, lower in zip(tops, tops[1:])), tops)
 
     def test_ends_on_one_side_of_a_box_are_a_lane_apart(self):
-        persons = [person(f"P-000{number}") for number in range(5)]
-        relationships = [relationship(f"R-000{child}", "P-0000", "parent-of", f"P-000{child}") for child in range(1, 5)]
+        # 13 ends span 12 × 12 = 144 px, the most that fits within 74 px of the side's middle.
+        for children in (4, 13):
+            with self.subTest(children=children):
+                persons = [person(f"P-{number:04d}") for number in range(children + 1)]
+                relationships = [
+                    relationship(f"R-{child:04d}", "P-0000", "parent-of", f"P-{child:04d}")
+                    for child in range(1, children + 1)
+                ]
 
-        _, routes = routed(persons, relationships)
+                _, routes = routed(persons, relationships)
 
-        x, y = routes.positions["P-0000"]
-        starts = sorted(coordinates(edge)[0] for edge in routes.edges)
-        self.assertEqual({start_y for _, start_y in starts}, {y + 24})
-        xs = [start_x for start_x, _ in starts]
-        self.assertTrue(all(right - left >= 12 for left, right in zip(xs, xs[1:])), xs)
-        self.assertTrue(all(abs(start_x - x) <= 74 for start_x in xs), xs)
+                x, y = routes.positions["P-0000"]
+                starts = sorted(coordinates(edge)[0] for edge in routes.edges)
+                self.assertEqual({start_y for _, start_y in starts}, {y + 24})
+                xs = [start_x for start_x, _ in starts]
+                self.assertEqual(len(xs), children)
+                self.assertTrue(all(right - left >= 12 for left, right in zip(xs, xs[1:])), xs)
+                self.assertTrue(all(abs(start_x - x) <= 74 for start_x in xs), xs)
 
     def test_every_end_stays_on_its_own_box_side(self):
         bundle_through_a_row = (

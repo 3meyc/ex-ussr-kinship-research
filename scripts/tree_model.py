@@ -184,8 +184,8 @@ def _keyed_rows(rows: Iterable[Mapping[str, str]], id_name: str) -> _KeyedRows:
 
 
 def _clean_row(row: Mapping[str, str]) -> dict[str, str]:
-    """Строка реестра с очищенными значениями; колонки без имени и пропущенные значения (None) не входят."""
-    return {name: clean(value) for name, value in row.items() if isinstance(name, str) and isinstance(value, str)}
+    """Строка реестра с очищенными значениями."""
+    return {name: clean(value) for name, value in row.items()}
 
 
 def _node(row: Mapping[str, str], *, hidden: bool) -> Node:

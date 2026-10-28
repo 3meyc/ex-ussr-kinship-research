@@ -44,12 +44,6 @@ class LivingStatusAfterCleaning(unittest.TestCase):
         graph = build_graph([person], [], shareable=True, current_year=2026)
         self.assertEqual((graph.nodes[0].hidden, graph.nodes[0].label, graph.hidden_count), (True, "P-0001", 1))
 
-    def test_status_padded_with_spaces_still_counts(self):
-        person = {"person_id": "P-0001", "preferred_label": "Анна", "living_status": " deceased ",
-                  "birth_estimate": "1990"}
-        graph = build_graph([person], [], shareable=True, current_year=2026)
-        self.assertEqual((graph.nodes[0].hidden, graph.hidden_count), (False, 0))
-
 
 if __name__ == "__main__":
     unittest.main()

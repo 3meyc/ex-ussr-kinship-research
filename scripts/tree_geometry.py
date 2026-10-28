@@ -45,7 +45,6 @@ _LANE = 12  # шаг портов на стороне узла и наимень
 # выше и к узлам строки ниже в одном промежутке не совпадают.
 _NEAR = _LANE // 2
 _PHASE = {"bottom": 0, "top": _LANE // 2}
-_PORT_REACH = 66  # шаг портов стороны выбирается так, чтобы все они поместились в ±_PORT_REACH
 # Ни один конец пути не дальше этого от середины стороны: на прямом участке рамки, до скругления.
 _END_REACH = NODE_WIDTH // 2 - NODE_RADIUS
 _CLEARANCE = 12  # наименьший зазор между каналом и чужим узлом или краем холста
@@ -175,7 +174,7 @@ def _bundles(edges: Sequence[Edge], grid: _Grid) -> list[_Bundle]:
 
 def _side_spacing(bundles: Sequence[_Bundle]) -> dict[tuple[str, str], int]:
     """Шаг портов на каждой стороне узла: _LANE, а если столько дорожек не помещается в
-    2 × _PORT_REACH, — наибольший меньший чётный шаг, при котором помещаются (1 или 0, если не
+    2 × _END_REACH, — наибольший меньший чётный шаг, при котором помещаются (1 или 0, если не
     помещается и шаг 2; см. _spacing)."""
     lanes: dict[tuple[str, str], int] = {}
     for bundle in bundles:
@@ -185,12 +184,12 @@ def _side_spacing(bundles: Sequence[_Bundle]) -> dict[tuple[str, str], int]:
 
 
 def _spacing(lanes: int) -> int:
-    """Шаг, при котором lanes дорожек помещаются в 2 × _PORT_REACH: чётный, пока он не меньше 2
-    (дорожки пучка симметричны), затем 1, а больше чем 2 × _PORT_REACH + 1 дорожек сходятся в
+    """Шаг, при котором lanes дорожек помещаются в 2 × _END_REACH: чётный, пока он не меньше 2
+    (дорожки пучка симметричны), затем 1, а больше чем 2 × _END_REACH + 1 дорожек сходятся в
     середине стороны (шаг 0): в целых координатах их не развести, но ни одна не уходит со стороны."""
-    if lanes < 2 or (lanes - 1) * _LANE <= 2 * _PORT_REACH:
+    if lanes < 2 or (lanes - 1) * _LANE <= 2 * _END_REACH:
         return _LANE
-    step = 2 * _PORT_REACH // (lanes - 1)
+    step = 2 * _END_REACH // (lanes - 1)
     return step // 2 * 2 if step >= 2 else step
 
 
@@ -293,18 +292,34 @@ def _ports(
         if gap == _LANE and all(step == _LANE or count == 1 for count, step in zip(counts, steps)):
             starts = _phase_starts(centre, counts, _PHASE[side], near)
         if starts is None:
-            starts = _packed_starts(centre, counts, steps, gap, near)
+            own = [_own_start(channels.get(index, ()), end, half[index]) for _, index, end in entries]
+            starts = _packed_starts(centre, counts, steps, gap, near, own)
         for (_, index, end), start in zip(entries, starts):
             ports[index, end] = start + half[index]
     return ports
 
 
+def _own_start(channel_xs: Sequence[int], end: int, half: int) -> int | None:
+    """x первой дорожки, при котором пучок стоит ровно на своём канале в строке рядом с концом end,
+    или None, если канала там нет (пучок между соседними строками или дуга)."""
+    if not channel_xs:
+        return None
+    return (channel_xs[0] if end == 0 else channel_xs[-1]) - half
+
+
 def _packed_starts(
-    centre: int, counts: Sequence[int], steps: Sequence[int], gap: int, channels: Sequence[tuple[int, int]]
+    centre: int,
+    counts: Sequence[int],
+    steps: Sequence[int],
+    gap: int,
+    channels: Sequence[tuple[int, int]],
+    own: Sequence[int | None],
 ) -> list[int]:
     """x первой дорожки каждого пучка стороны: пучки подряд через gap, сдвинутые в пределах
     ±_END_REACH от середины стороны так, чтобы ближе _NEAR к каналам channels стояло меньше всего
-    дорожек, а из таких сдвигов — ближайший к середине; шире 2 × _END_REACH — по центру стороны."""
+    дорожек, а из таких сдвигов — ближайший к середине; шире 2 × _END_REACH — по центру стороны.
+    Пучок, который стоит ровно на своём канале (первая дорожка в own), идёт к нему отвесно и не
+    считается теснящим; в 1–5 px от своего канала — считается: там путь сделал бы едва заметный излом."""
     widths = [(count - 1) * step for count, step in zip(counts, steps)]
     span = sum(widths) + gap * (len(widths) - 1)
     first = centre - span // 2
@@ -318,8 +333,12 @@ def _packed_starts(
         return starts
 
     def crowded(offset: int) -> tuple[int, int, int]:
-        starts = starts_at(offset)
-        lanes = (start + lane * step for start, count, step in zip(starts, counts, steps) for lane in range(count))
+        lanes = (
+            start + lane * step
+            for start, count, step, own_start in zip(starts_at(offset), counts, steps, own)
+            if start != own_start
+            for lane in range(count)
+        )
         return sum(_near_channel(x, channels) for x in lanes), abs(offset), offset
 
     return starts_at(min(offsets, key=crowded, default=0))

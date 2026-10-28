@@ -169,7 +169,7 @@ def _keyed_rows(rows: Iterable[Mapping[str, str]], id_name: str) -> _KeyedRows:
     for row in rows:
         raw_id = row.get(id_name) or ""
         cleaned_id = clean(raw_id)
-        if not cleaned_id and not raw_id.strip():
+        if not raw_id.strip():
             skipped += 1
             continue
         raw_ids.setdefault(cleaned_id, []).append(raw_id)

@@ -173,9 +173,7 @@ def _bundles(edges: Sequence[Edge], grid: _Grid) -> list[_Bundle]:
 
 
 def _side_spacing(bundles: Sequence[_Bundle]) -> dict[tuple[str, str], int]:
-    """Шаг портов на каждой стороне узла: _LANE, а если столько дорожек не помещается в
-    2 × _END_REACH, — наибольший меньший чётный шаг, при котором помещаются (1 или 0, если не
-    помещается и шаг 2; см. _spacing)."""
+    """Шаг портов на каждой стороне узла по числу её дорожек (см. _spacing)."""
     lanes: dict[tuple[str, str], int] = {}
     for bundle in bundles:
         for side in bundle.sides:
@@ -317,7 +315,7 @@ def _packed_starts(
 ) -> list[int]:
     """x первой дорожки каждого пучка стороны: пучки подряд через gap, сдвинутые в пределах
     ±_END_REACH от середины стороны так, чтобы ближе _NEAR к каналам channels стояло меньше всего
-    дорожек, а из таких сдвигов — ближайший к середине; шире 2 × _END_REACH — по центру стороны.
+    дорожек, а из таких сдвигов — ближайший к середине (_spacing держит ширину в 2 × _END_REACH).
     Пучок, который стоит ровно на своём канале (первая дорожка в own), идёт к нему отвесно и не
     считается теснящим; в 1–5 px от своего канала — считается: там путь сделал бы едва заметный излом."""
     widths = [(count - 1) * step for count, step in zip(counts, steps)]
@@ -341,7 +339,7 @@ def _packed_starts(
         )
         return sum(_near_channel(x, channels) for x in lanes), abs(offset), offset
 
-    return starts_at(min(offsets, key=crowded, default=0))
+    return starts_at(min(offsets, key=crowded))
 
 
 def _phase_starts(
@@ -367,11 +365,15 @@ def _phase_starts(
             slot += count
         return slots
 
+    def bounds(slots: list[int]) -> tuple[int, int]:
+        return base + slots[0] * _LANE, base + (slots[-1] + counts[-1] - 1) * _LANE
+
     def error(slots: list[int]) -> int:
-        return abs(base + (slots[0] + slots[-1] + counts[-1] - 1) * _LANE // 2 - centre)
+        left, right = bounds(slots)
+        return abs((left + right) // 2 - centre)
 
     def fits(slots: list[int]) -> bool:
-        left, right = base + slots[0] * _LANE, base + (slots[-1] + counts[-1] - 1) * _LANE
+        left, right = bounds(slots)
         return centre - _END_REACH <= left and right <= centre + _END_REACH
 
     packings = [packing for packing in map(pack, sorted(range(-total, total + 1), key=abs)) if fits(packing)]

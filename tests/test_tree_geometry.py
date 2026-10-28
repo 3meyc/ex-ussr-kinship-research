@@ -116,14 +116,14 @@ class EdgeGeometryTest(unittest.TestCase):
                 _, routes = routed(persons, relationships)
 
                 for edge, data in zip(routes.edges, sorted(relationships, key=lambda row: row["relationship_id"])):
-                    ends = coordinates(edge)[0], coordinates(edge)[-1]
+                    points = coordinates(edge)
                     people = data["person_a_id"], data["person_b_id"]
                     rows = [routes.positions[person_id][1] for person_id in people]
-                    for (end_x, end_y), person_id, row in zip(ends, people, rows):
+                    for (end_x, end_y), person_id in zip((points[0], points[-1]), people):
                         x, y = routes.positions[person_id]
                         # Same row: both ends on the top side; otherwise the upper box's bottom
                         # side meets the lower box's top side.
-                        side = 24 if row < max(rows) else -24
+                        side = 24 if y < max(rows) else -24
                         self.assertEqual(end_y, y + side, (data["relationship_id"], person_id))
                         # 80 is half the box width; ends stay off its 6 px rounded corners.
                         self.assertLessEqual(abs(end_x - x), 74, (data["relationship_id"], person_id, end_x, x))

@@ -105,6 +105,15 @@ def split_ids(value: str) -> list[str]:
     return [part.strip() for part in normalized.split(";") if part.strip()]
 
 
+def plural_ru(count: int, one: str, few: str, many: str) -> str:
+    """Форма слова для числа count: one (1, 21), few (2–4, 22–24) или many (5–20, 11–14)."""
+    if count % 10 == 1 and count % 100 != 11:
+        return one
+    if count % 10 in (2, 3, 4) and count % 100 not in (12, 13, 14):
+        return few
+    return many
+
+
 def read_csv(path: Path, required: set[str]) -> Register:
     """Строки реестра с номерами строк файла и ошибки чтения."""
     errors: list[str] = []

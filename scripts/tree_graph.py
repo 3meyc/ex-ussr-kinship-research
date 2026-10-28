@@ -18,7 +18,7 @@ from collections.abc import Mapping, Sequence
 from datetime import date
 from pathlib import Path
 
-from audit_evidence import Register, audit_registers, load_registers
+from audit_evidence import Register, audit_registers, load_registers, plural_ru
 from build_pdf import find_chrome, print_pdf
 from research_common import atomic_bytes
 from tree_layout import layout
@@ -111,21 +111,13 @@ def _report_id_conflicts(error: IdConflictError) -> None:
         print(f"- {conflict.column} {raw_ids}: после очистки {result}", file=sys.stderr)
     more = len(error.conflicts) - _ERRORS_SHOWN
     if more > 0:
-        print(f"- ещё {more} {_groups_ru(more)}", file=sys.stderr)
+        print(f"- ещё {more} {plural_ru(more, 'группа', 'группы', 'групп')}", file=sys.stderr)
     print(
         "Такие id различаются только управляющими знаками, пробелами по краям или формой Юникода; "
         "исправьте их в реестрах.",
         file=sys.stderr,
     )
 
-
-def _groups_ru(count: int) -> str:
-    """Слово «группа» в форме для числа count."""
-    if count % 10 == 1 and count % 100 != 11:
-        return "группа"
-    if count % 10 in (2, 3, 4) and count % 100 not in (12, 13, 14):
-        return "группы"
-    return "групп"
 
 
 def _build_graph(registers: Mapping[str, Register], *, shareable: bool) -> Graph:

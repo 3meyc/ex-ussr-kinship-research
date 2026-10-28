@@ -15,7 +15,15 @@ from dataclasses import dataclass
 from itertools import accumulate
 from typing import TYPE_CHECKING
 
-from tree_geometry import LABEL_SIZE, NODE_HEIGHT, NODE_WIDTH, char_em, node_box, route
+from tree_geometry import (
+    LABEL_SIZE,
+    NODE_HEIGHT,
+    NODE_RADIUS,
+    NODE_WIDTH,
+    char_em,
+    node_box,
+    route,
+)
 from tree_model import DIRECTED_TYPES, STATUSES
 
 if TYPE_CHECKING:
@@ -147,7 +155,7 @@ def _svg_node(node: Node, centre: Point) -> str:
     full = " ".join(text for text in (node.label, node.years) if text)
     return (
         f'<g class="node" data-id="{_attr(node.person_id)}" tabindex="0"><title>{_attr(full)}</title>'
-        f'<rect x="{_num(left)}" y="{_num(top)}" width="{NODE_WIDTH}" height="{NODE_HEIGHT}" rx="6" '
+        f'<rect x="{_num(left)}" y="{_num(top)}" width="{NODE_WIDTH}" height="{NODE_HEIGHT}" rx="{NODE_RADIUS}" '
         f'fill="{fill}" stroke="{_INK}" stroke-width="1"{dash}/>{texts}</g>'
     )
 

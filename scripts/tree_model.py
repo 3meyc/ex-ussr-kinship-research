@@ -6,12 +6,11 @@
 
 from __future__ import annotations
 
-import re
-import unicodedata
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 
 from privacy import counts_as_living
+from register_text import clean
 
 # Статусы связи в порядке легенды. Пустой или неизвестный статус рисуется как unresolved.
 STATUSES = (
@@ -64,9 +63,6 @@ _SHAREABLE_RELATIONSHIP_FIELDS = tuple(name for name in _RELATIONSHIP_FIELDS if 
 _HIDDEN_ENDPOINT_FIELDS = tuple(
     name for name in _SHAREABLE_RELATIONSHIP_FIELDS if name not in ("confidence", "biological_legal_household")
 )
-# Управляющие знаки C0 и знаки, недопустимые в XML (суррогаты, U+FFFE, U+FFFF): в тексте реестров
-# они становятся пробелом, поэтому ни один вывод (SVG, HTML, PDF, Mermaid, DOT) их не получает.
-_UNPRINTABLE = re.compile(r"[\x00-\x1f\ud800-\udfff\ufffe\uffff]")
 
 
 @dataclass(frozen=True)
@@ -105,7 +101,8 @@ class IdConflictError(ValueError):
 
     def __init__(self, conflicts: Iterable[IdConflict]) -> None:
         self.conflicts = tuple(conflicts)
-        super().__init__(f"id пусты или совпадают после очистки текста: {len(self.conflicts)}")
+        ids = sum(len(conflict.raw_ids) for conflict in self.conflicts)
+        super().__init__(f"id пусты или совпадают после очистки текста: {ids}")
 
 
 @dataclass(frozen=True)
@@ -124,9 +121,8 @@ def build_graph(
     shareable: bool,
     current_year: int,
 ) -> Graph:
-    """Граф из строк person-register и relationship-register; каждая строка очищается один раз, и
-    правило о живых, и граф читают очищенную строку (статус, изменённый очисткой, — вне списка).
-    Строки с пустым id пропускаются.
+    """Граф из строк person-register и relationship-register; граф читает очищенные строки
+    (register_text.clean), правило о живых — строки как они записаны. Строки с пустым id пропускаются.
     В передаваемом режиме (shareable) живые по правилу privacy.counts_as_living лица показаны
     только person_id, у связей нет обоснования, а у связей таких лиц — и вида связи с уверенностью.
 
@@ -139,14 +135,14 @@ def build_graph(
         raise IdConflictError(conflicts)
     nodes = sorted(
         (
-            _node(cleaned, hidden=shareable and _counts_as_living(raw, cleaned, current_year))
-            for raw, cleaned in person_rows.rows
+            _node(_clean_row(row), hidden=shareable and counts_as_living(row, current_year))
+            for row in person_rows.rows
         ),
         key=lambda node: node.person_id,
     )
     hidden_ids = frozenset(node.person_id for node in nodes if node.hidden)
     edges = sorted(
-        (_edge(cleaned, shareable=shareable, hidden_ids=hidden_ids) for _, cleaned in relationship_rows.rows),
+        (_edge(_clean_row(row), shareable=shareable, hidden_ids=hidden_ids) for row in relationship_rows.rows),
         key=lambda edge: edge.relationship_id,
     )
     return Graph(
@@ -160,26 +156,25 @@ def build_graph(
 
 @dataclass(frozen=True)
 class _KeyedRows:
-    rows: tuple[tuple[Mapping[str, str], dict[str, str]], ...]  # (как в реестре, очищенная) с непустым id
+    rows: tuple[Mapping[str, str], ...]  # строки как в реестре, чей id после очистки не пуст
     skipped: int  # строки с пустым id
     conflicts: tuple[IdConflict, ...]  # id, которые очистка опустошила или слила с другими
 
 
 def _keyed_rows(rows: Iterable[Mapping[str, str]], id_name: str) -> _KeyedRows:
-    """Строки реестра, очищенные один раз, по их id."""
-    kept: list[tuple[Mapping[str, str], dict[str, str]]] = []
+    """Строки реестра с непустым после очистки id, число строк с пустым id и конфликты id."""
+    kept: list[Mapping[str, str]] = []
     skipped = 0
     raw_ids: dict[str, list[str]] = {}  # id после очистки → id как в реестре
     for row in rows:
         raw_id = row.get(id_name) or ""
-        cleaned = _clean_row(row)
-        cleaned_id = cleaned.get(id_name, "")
+        cleaned_id = clean(raw_id)
         if not cleaned_id and not raw_id.strip():
             skipped += 1
             continue
         raw_ids.setdefault(cleaned_id, []).append(raw_id)
         if cleaned_id:
-            kept.append((row, cleaned))
+            kept.append(row)
     conflicts = tuple(
         IdConflict(id_name, cleaned_id, tuple(ids))
         for cleaned_id, ids in raw_ids.items()
@@ -188,18 +183,9 @@ def _keyed_rows(rows: Iterable[Mapping[str, str]], id_name: str) -> _KeyedRows:
     return _KeyedRows(tuple(kept), skipped, conflicts)
 
 
-def _counts_as_living(raw: Mapping[str, str], cleaned: Mapping[str, str], current_year: int) -> bool:
-    """privacy.counts_as_living по очищенной строке. Статус, который очистка изменила не только
-    срезом пробелов по краям, читается пустым, то есть вне списка: правило не должно снимать
-    признак живого по тексту, которого в реестре нет."""
-    if cleaned.get("living_status", "") != (raw.get("living_status") or "").strip():
-        cleaned = {**cleaned, "living_status": ""}
-    return counts_as_living(cleaned, current_year)
-
-
 def _clean_row(row: Mapping[str, str]) -> dict[str, str]:
     """Строка реестра с очищенными значениями; колонки без имени и пропущенные значения (None) не входят."""
-    return {name: _clean(value) for name, value in row.items() if isinstance(name, str) and isinstance(value, str)}
+    return {name: clean(value) for name, value in row.items() if isinstance(name, str) and isinstance(value, str)}
 
 
 def _node(row: Mapping[str, str], *, hidden: bool) -> Node:
@@ -247,7 +233,3 @@ def _edge(row: Mapping[str, str], *, shareable: bool, hidden_ids: frozenset[str]
 def _pick(row: Mapping[str, str], names: tuple[str, ...]) -> tuple[tuple[str, str], ...]:
     return tuple((name, row.get(name, "")) for name in names)
 
-
-def _clean(text: str) -> str:
-    """Текст реестра для вывода: непечатаемые знаки — пробелы, форма NFC, без пробелов по краям."""
-    return unicodedata.normalize("NFC", _UNPRINTABLE.sub(" ", text)).strip()

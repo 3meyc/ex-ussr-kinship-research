@@ -83,7 +83,7 @@ class EdgeGeometryTest(unittest.TestCase):
         self.assertEqual({start_y for _, start_y in starts}, {y + 24})
         xs = [start_x for start_x, _ in starts]
         self.assertTrue(all(right - left >= 12 for left, right in zip(xs, xs[1:])), xs)
-        self.assertTrue(all(x - 80 < start_x < x + 80 for start_x in xs), xs)
+        self.assertTrue(all(abs(start_x - x) <= 74 for start_x in xs), xs)
 
     def test_every_end_stays_on_its_own_box_side(self):
         bundle_through_a_row = (
@@ -110,10 +110,16 @@ class EdgeGeometryTest(unittest.TestCase):
 
                 for edge, data in zip(routes.edges, sorted(relationships, key=lambda row: row["relationship_id"])):
                     ends = coordinates(edge)[0], coordinates(edge)[-1]
-                    for (end_x, end_y), person_id in zip(ends, (data["person_a_id"], data["person_b_id"])):
+                    people = data["person_a_id"], data["person_b_id"]
+                    rows = [routes.positions[person_id][1] for person_id in people]
+                    for (end_x, end_y), person_id, row in zip(ends, people, rows):
                         x, y = routes.positions[person_id]
-                        self.assertIn(end_y, (y - 24, y + 24), (data["relationship_id"], person_id))
-                        self.assertLess(abs(end_x - x), 80, (data["relationship_id"], person_id, end_x, x))
+                        # Same row: both ends on the top side; otherwise the upper box's bottom
+                        # side meets the lower box's top side.
+                        side = 24 if row < max(rows) else -24
+                        self.assertEqual(end_y, y + side, (data["relationship_id"], person_id))
+                        # 80 is half the box width; ends stay off its 6 px rounded corners.
+                        self.assertLessEqual(abs(end_x - x), 74, (data["relationship_id"], person_id, end_x, x))
 
 
 if __name__ == "__main__":

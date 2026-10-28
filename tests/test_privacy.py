@@ -14,7 +14,8 @@ from privacy import counts_as_living
 
 class CountsAsLivingTest(unittest.TestCase):
     def test_living_rule_table(self):
-        # current_year 2026: births after 1916 count as living; death text is never read.
+        # current_year 2026: births after 1916 count as living; death text is never read; a status that
+        # text cleaning changes never marks a person deceased, and living in either form wins.
         cases = [
             ("living", "1950", "", True),
             ("living", "1950", "2001", True),
@@ -36,6 +37,8 @@ class CountsAsLivingTest(unittest.TestCase):
             ("living", "1910", "", True),
             ("", "", "1941", True),
             ("probably-deceased", "1990", "", False),
+            ("\x01deceased", "1990", "", True),
+            ("\x01living", "1900", "", True),
             ("living", "1950", "   ", True),
             ("  ", "", "", True),
         ]

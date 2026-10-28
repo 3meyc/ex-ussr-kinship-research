@@ -22,7 +22,7 @@ from audit_evidence import Register, audit_registers, load_registers
 from build_pdf import find_chrome, print_pdf
 from research_common import atomic_bytes
 from tree_layout import layout
-from tree_model import Graph, IdConflict, IdConflictError, build_graph
+from tree_model import Graph, IdConflictError, build_graph
 from tree_render import (
     render_dot,
     render_html,
@@ -54,7 +54,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         graph = _build_graph(registers, shareable=args.exclude_living)
     except IdConflictError as error:
-        _report_id_conflicts(error.conflicts)
+        _report_id_conflicts(error)
         return EXIT_AUDIT_ERRORS
     # Режимы пишут в разные папки: tree/share/ можно отправить целиком, не выбирая файлы.
     if graph.shareable:
@@ -100,11 +100,11 @@ def _report_audit_errors(errors: Sequence[str], case_dir: Path) -> None:
     print(f"Все ошибки: {command}", file=sys.stderr)
 
 
-def _report_id_conflicts(conflicts: Sequence[IdConflict]) -> None:
-    """Каждая группа id, слитых или опустошённых очисткой, — одной строкой; id в записи Python (repr),
-    чтобы управляющие знаки было видно в терминале."""
-    print(f"Граф не построен: id пусты или совпадают после очистки текста: {len(conflicts)}.", file=sys.stderr)
-    for conflict in conflicts[:_ERRORS_SHOWN]:
+def _report_id_conflicts(error: IdConflictError) -> None:
+    """Заголовок с числом id из ошибки, затем каждая группа id, слитых или опустошённых очисткой, —
+    одной строкой; id в записи Python (repr), чтобы управляющие знаки было видно в терминале."""
+    print(f"Граф не построен: {error}.", file=sys.stderr)
+    for conflict in error.conflicts[:_ERRORS_SHOWN]:
         raw_ids = ", ".join(f"{raw_id!r}" for raw_id in conflict.raw_ids)
         result = f"{conflict.cleaned!r}" if conflict.cleaned else "пусто"
         print(f"- {conflict.column} {raw_ids}: после очистки {result}", file=sys.stderr)

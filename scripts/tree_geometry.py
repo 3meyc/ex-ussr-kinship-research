@@ -31,6 +31,7 @@ if TYPE_CHECKING:
 
 NODE_WIDTH = 160
 NODE_HEIGHT = 48
+NODE_RADIUS = 6  # радиус скругления углов рамки узла
 LABEL_SIZE = 10
 CHAR_EM = 0.6  # ширина знака с запасом, в долях кегля (sans-serif)
 # Заглавные и эти строчные в sans-serif шире CHAR_EM: строка из них не помещается при той же длине.
@@ -44,7 +45,9 @@ _LANE = 12  # шаг портов на стороне узла и наимень
 # выше и к узлам строки ниже в одном промежутке не совпадают.
 _NEAR = _LANE // 2
 _PHASE = {"bottom": 0, "top": _LANE // 2}
-_PORT_REACH = 66  # порты не дальше этого от середины стороны, вне скруглённых углов рамки
+_PORT_REACH = 66  # шаг портов стороны выбирается так, чтобы все они поместились в ±_PORT_REACH
+# Ни один конец пути не дальше этого от середины стороны: на прямом участке рамки, до скругления.
+_END_REACH = NODE_WIDTH // 2 - NODE_RADIUS
 _CLEARANCE = 12  # наименьший зазор между каналом и чужим узлом или краем холста
 _ARC_RISE = 24  # наименьший подъём дуги между лицами одной строки над их узлами
 _CORNER = 6  # радиус скругления угла пути
@@ -172,7 +175,8 @@ def _bundles(edges: Sequence[Edge], grid: _Grid) -> list[_Bundle]:
 
 def _side_spacing(bundles: Sequence[_Bundle]) -> dict[tuple[str, str], int]:
     """Шаг портов на каждой стороне узла: _LANE, а если столько дорожек не помещается в
-    2 × _PORT_REACH, — наибольший меньший шаг, при котором помещаются (см. _spacing)."""
+    2 × _PORT_REACH, — наибольший меньший чётный шаг, при котором помещаются (1 или 0, если не
+    помещается и шаг 2; см. _spacing)."""
     lanes: dict[tuple[str, str], int] = {}
     for bundle in bundles:
         for side in bundle.sides:
@@ -283,42 +287,57 @@ def _ports(
         counts = [bundles[index].count for _, index, _ in entries]
         steps = [spacing[index] for _, index, _ in entries]
         centre = grid.xs[person_id]
+        row = grid.row_of[person_id] + (1 if side == "bottom" else -1)
+        near = row_channels.get(row, ())
         starts = None
         if gap == _LANE and all(step == _LANE or count == 1 for count, step in zip(counts, steps)):
-            row = grid.row_of[person_id] + (1 if side == "bottom" else -1)
-            starts = _phase_starts(centre, counts, _PHASE[side], row_channels.get(row, ()))
+            starts = _phase_starts(centre, counts, _PHASE[side], near)
         if starts is None:
-            starts = _packed_starts(centre, counts, steps, gap)
+            starts = _packed_starts(centre, counts, steps, gap, near)
         for (_, index, end), start in zip(entries, starts):
             ports[index, end] = start + half[index]
     return ports
 
 
-def _packed_starts(centre: int, counts: Sequence[int], steps: Sequence[int], gap: int) -> list[int]:
-    """x первой дорожки каждого пучка стороны: пучки подряд через gap, по центру стороны."""
+def _packed_starts(
+    centre: int, counts: Sequence[int], steps: Sequence[int], gap: int, channels: Sequence[tuple[int, int]]
+) -> list[int]:
+    """x первой дорожки каждого пучка стороны: пучки подряд через gap, сдвинутые в пределах
+    ±_END_REACH от середины стороны так, чтобы ближе _NEAR к каналам channels стояло меньше всего
+    дорожек, а из таких сдвигов — ближайший к середине; шире 2 × _END_REACH — по центру стороны."""
     widths = [(count - 1) * step for count, step in zip(counts, steps)]
-    start = centre - (sum(widths) + gap * (len(widths) - 1)) // 2
-    starts = []
-    for width in widths:
-        starts.append(start)
-        start += width + gap
-    return starts
+    span = sum(widths) + gap * (len(widths) - 1)
+    first = centre - span // 2
+    offsets = range(centre - _END_REACH - first, centre + _END_REACH - span - first + 1)
+
+    def starts_at(offset: int) -> list[int]:
+        starts, start = [], first + offset
+        for width in widths:
+            starts.append(start)
+            start += width + gap
+        return starts
+
+    def crowded(offset: int) -> tuple[int, int, int]:
+        starts = starts_at(offset)
+        lanes = (start + lane * step for start, count, step in zip(starts, counts, steps) for lane in range(count))
+        return sum(_near_channel(x, channels) for x in lanes), abs(offset), offset
+
+    return starts_at(min(offsets, key=crowded, default=0))
 
 
 def _phase_starts(
     centre: int, counts: Sequence[int], phase: int, channels: Sequence[tuple[int, int]]
 ) -> list[int] | None:
     """x первой дорожки каждого пучка стороны, где все дорожки стоят на сетке _LANE со сдвигом phase,
-    подряд и не ближе _NEAR к каналам channels ((x, половина ширины)); из таких раскладок — та, что
-    ближе всего к середине стороны. Свой канал пучка тоже отодвигает его порты: иначе порт встаёт в
-    1–5 px от канала и путь делает едва заметный излом. None — если лучшая раскладка выходит за
-    _PORT_REACH от середины стороны (каналы теснят порты к краю узла)."""
+    подряд и не ближе _NEAR к каналам channels ((x, половина ширины)); из таких раскладок в пределах
+    ±_END_REACH от середины стороны — та, что ближе всего к середине. Свой канал пучка тоже
+    отодвигает его порты: иначе порт встаёт в 1–5 px от канала и путь делает едва заметный излом.
+    None — если ни одна раскладка не помещается в ±_END_REACH (каналы теснят порты к краю узла)."""
     total = sum(counts)
     base = _snap(centre - (total - 1) * _LANE // 2, phase)
 
     def blocked(slot: int) -> bool:
-        x = base + slot * _LANE
-        return any(abs(x - channel) < _NEAR + width for channel, width in channels)
+        return _near_channel(base + slot * _LANE, channels)
 
     def pack(first: int) -> list[int]:
         slots, slot = [], first
@@ -332,11 +351,19 @@ def _phase_starts(
     def error(slots: list[int]) -> int:
         return abs(base + (slots[0] + slots[-1] + counts[-1] - 1) * _LANE // 2 - centre)
 
-    best = min((pack(first) for first in sorted(range(-total, total + 1), key=abs)), key=error)
-    xs = [base + slot * _LANE for slot in best]
-    if xs[0] < centre - _PORT_REACH or xs[-1] + (counts[-1] - 1) * _LANE > centre + _PORT_REACH:
+    def fits(slots: list[int]) -> bool:
+        left, right = base + slots[0] * _LANE, base + (slots[-1] + counts[-1] - 1) * _LANE
+        return centre - _END_REACH <= left and right <= centre + _END_REACH
+
+    packings = [packing for packing in map(pack, sorted(range(-total, total + 1), key=abs)) if fits(packing)]
+    if not packings:
         return None
-    return xs
+    return [base + slot * _LANE for slot in min(packings, key=error)]
+
+
+def _near_channel(x: int, channels: Sequence[tuple[int, int]]) -> bool:
+    """Ближе ли x к одному из каналов ((x, половина ширины пучка)), чем _NEAR от края пучка."""
+    return any(abs(x - channel) < _NEAR + width for channel, width in channels)
 
 
 def _snap(x: int, phase: int) -> int:

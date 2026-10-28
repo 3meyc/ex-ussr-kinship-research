@@ -169,14 +169,14 @@ def check_html(html_path: Path) -> tuple[list[str], list[str]]:
 
 def find_chrome(explicit: str | None) -> str | None:
     for candidate in (explicit, os.environ.get("CHROME_PATH")):
-        if candidate and Path(candidate).exists():
+        if candidate and Path(candidate).is_file():
             return candidate
     for name in CHROME_NAMES:
         found = shutil.which(name)
         if found:
             return found
     for path in CHROME_PATHS:
-        if Path(path).exists():
+        if Path(path).is_file():
             return path
     return None
 

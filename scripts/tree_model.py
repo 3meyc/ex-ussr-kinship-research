@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import re
+import unicodedata
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 
@@ -62,6 +64,9 @@ _SHAREABLE_RELATIONSHIP_FIELDS = tuple(name for name in _RELATIONSHIP_FIELDS if 
 _HIDDEN_ENDPOINT_FIELDS = tuple(
     name for name in _SHAREABLE_RELATIONSHIP_FIELDS if name not in ("confidence", "biological_legal_household")
 )
+# Управляющие знаки C0 и знаки, недопустимые в XML (суррогаты, U+FFFE, U+FFFF): в тексте реестров
+# они становятся пробелом, поэтому ни один вывод (SVG, HTML, PDF, Mermaid, DOT) их не получает.
+_UNPRINTABLE = re.compile(r"[\x00-\x1f\ud800-\udfff\ufffe\uffff]")
 
 
 @dataclass(frozen=True)
@@ -178,5 +183,7 @@ def _pick(row: Mapping[str, str], names: tuple[str, ...]) -> tuple[tuple[str, st
 
 
 def _value(row: Mapping[str, str], name: str) -> str:
-    """Значение колонки без пробелов по краям; отсутствующая колонка читается пустой."""
-    return (row.get(name) or "").strip()
+    """Значение колонки, очищенное для вывода: непечатаемые знаки — пробелы, форма NFC, без пробелов
+    по краям; отсутствующая колонка читается пустой."""
+    printable = _UNPRINTABLE.sub(" ", row.get(name) or "")
+    return unicodedata.normalize("NFC", printable).strip()

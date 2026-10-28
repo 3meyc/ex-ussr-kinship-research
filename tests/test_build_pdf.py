@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from scripts.build_pdf import inspect_html
+from scripts.build_pdf import find_chrome, inspect_html
 
 SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "build_pdf.py"
 PROSE = (
@@ -49,6 +49,12 @@ class PdfPreflight(unittest.TestCase):
                 self.assertEqual(subprocess.run(command, capture_output=True).returncode, 0)
                 report.write_text("<script>forbidden()</script>", encoding="utf-8")
                 self.assertEqual(subprocess.run(command, capture_output=True).returncode, 1)
+
+
+class BrowserLookup(unittest.TestCase):
+    def test_browser_path_that_is_a_folder_is_not_used(self):
+        with tempfile.TemporaryDirectory() as folder:
+            self.assertNotEqual(find_chrome(folder), folder)
 
 
 if __name__ == "__main__":

@@ -67,7 +67,10 @@ _ARROW_NOTE = (
 _NODE_WIDTH = 160
 _NODE_HEIGHT = 48
 _NODE_PADDING = 6  # поле слева и справа от текста в узле
-_ARC_RISE = 48  # подъём контрольной точки дуги между лицами одной строки
+# Подъём дуги между лицами одной строки: _ARC_RISE плюс _ARC_SPAN_RISE на каждое удвоение пролёта
+# сверх ширины узла (длинная дуга проходит над короткой) плюс _LANE на каждую следующую связь пары.
+_ARC_RISE = 24
+_ARC_SPAN_RISE = 10
 _LANE = 12  # шаг между связями одной пары лиц и между каналами связей в строке
 _CLEARANCE = 12  # наименьший зазор между каналом связи и чужим узлом
 _CURVE_SAMPLES = 16  # точек на участок кривой при поиске места подписи
@@ -76,8 +79,6 @@ _LABEL_SIZE = 10
 _LABEL_GAP = 2  # зазор вокруг подписи
 # Доли длины пути, на которых пробуется подпись: от середины к концам, не доходя до узлов и стрелки.
 _LABEL_STEPS = (0.5, 0.4, 0.6, 0.3, 0.7, 0.2, 0.8)
-# Управляющие знаки C0 недопустимы в XML: в тексте SVG они заменены пробелом.
-_CONTROL_TO_SPACE = {code: " " for code in range(0x20)}
 
 
 def banner(graph: Graph) -> str:
@@ -120,14 +121,16 @@ def _svg_markers() -> str:
 
 
 def _svg_edges(graph: Graph, layout: Layout) -> list[str]:
-    """Связи по порядку; подпись каждой — в первой точке пути, свободной от узлов и прежних подписей."""
+    """Связи по порядку; подпись каждой — в первой точке пути, свободной от узлов и прежних подписей,
+    сдвинутой внутрь холста."""
     node_boxes = [_node_box(layout.positions[node.person_id]) for node in graph.nodes]
     router = _Router(layout)
     label_boxes: list[_Box] = []
     parts = []
-    for edge, offset in zip(graph.edges, _pair_offsets(graph.edges)):
-        path, points = router.route(edge, offset)
-        anchor = _label_anchor(edge.label, _label_anchors(points), node_boxes, label_boxes)
+    for edge, lane in zip(graph.edges, _pair_lanes(graph.edges)):
+        path, points = router.route(edge, lane)
+        anchors = [_on_canvas(edge.label, anchor, layout) for anchor in _label_anchors(points)]
+        anchor = _label_anchor(edge.label, anchors, node_boxes, label_boxes)
         label_boxes.append(_label_box(edge.label, anchor))
         parts.append(_svg_edge(edge, path, anchor))
     return parts
@@ -157,6 +160,17 @@ def _label_box(label: str, anchor: tuple[int, int]) -> _Box:
     x, baseline = anchor
     half = len(label) * _LABEL_SIZE * _CHAR_EM / 2 + _LABEL_GAP
     return (x - half, baseline - _LABEL_SIZE - _LABEL_GAP, x + half, baseline + _LABEL_SIZE * 0.3 + _LABEL_GAP)
+
+
+def _on_canvas(label: str, anchor: tuple[int, int], layout: Layout) -> tuple[int, int]:
+    """anchor, сдвинутый так, чтобы рамка подписи (_label_box) лежала на холсте; подпись шире
+    холста стоит по его середине."""
+    left, top, right, bottom = _label_box(label, (0, 0))
+    x_low, x_high = math.ceil(-left), math.floor(layout.width - right)
+    y_low, y_high = math.ceil(-top), math.floor(layout.height - bottom)
+    x = min(max(anchor[0], x_low), x_high) if x_low <= x_high else round(layout.width / 2)
+    y = min(max(anchor[1], y_low), y_high) if y_low <= y_high else round(layout.height / 2)
+    return x, y
 
 
 def _overlap(first: _Box, second: _Box) -> bool:
@@ -189,24 +203,38 @@ def _stroke_attrs(encoding: _Encoding) -> str:
     return style
 
 
-def _pair_offsets(edges: Sequence[Edge]) -> list[int]:
-    """Сдвиг концов каждой связи по x: связи одной пары лиц расходятся на _LANE по порядку
-    relationship_id, симметрично середине узла; у единственной связи пары — 0."""
+@dataclass(frozen=True)
+class _Lane:
+    """Место связи среди связей той же пары лиц (по порядку relationship_id)."""
+
+    index: int
+    count: int
+
+    @property
+    def offset(self) -> int:
+        """Сдвиг концов по x: дорожки пары расходятся на _LANE симметрично середине узла."""
+        return round((self.index - (self.count - 1) / 2) * _LANE)
+
+
+def _pair_lanes(edges: Sequence[Edge]) -> list[_Lane]:
+    """Дорожка каждой связи; у единственной связи пары — _Lane(0, 1)."""
     pairs: dict[frozenset[str], list[int]] = {}
     for index, edge in enumerate(edges):
         pairs.setdefault(frozenset((edge.a, edge.b)), []).append(index)
-    offsets = [0] * len(edges)
+    lanes = [_Lane(0, 1)] * len(edges)
     for indexes in pairs.values():
         for lane, index in enumerate(indexes):
-            offsets[index] = round((lane - (len(indexes) - 1) / 2) * _LANE)
-    return offsets
+            lanes[index] = _Lane(lane, len(indexes))
+    return lanes
 
 
 class _Router:
     """Пути связей в порядке вызова. Связь через несколько строк проходит каждую промежуточную
     строку по вертикальному каналу, свободному от узлов (с зазором _CLEARANCE) и от каналов прежних
     связей (с шагом _LANE), а между строками — кривой. Поэтому длинная связь не ложится ни под узел,
-    ни на другую связь; связи соседних строк и одной строки проходят только промежутки между строками."""
+    ни на другую связь; связи соседних строк и одной строки проходят только промежутки между строками.
+    Несколько связей одной пары лиц идут дорожками (_lane_points) через общие каналы, по каналу на
+    строку для всей пары."""
 
     def __init__(self, layout: Layout) -> None:
         self._positions = layout.positions
@@ -216,36 +244,69 @@ class _Router:
             reach = _NODE_WIDTH / 2 + _CLEARANCE
             self._nodes.setdefault(y, []).append((x - reach, x + reach))
         self._channels: dict[float, list[tuple[float, float]]] = {}  # y строки → занятые каналы
+        self._bundles: dict[frozenset[str], tuple[float, ...]] = {}  # пара лиц → x её каналов сверху вниз
 
-    def route(self, edge: Edge, offset: int) -> _Route:
+    def route(self, edge: Edge, lane: _Lane) -> _Route:
         (x1, y1), (x2, y2) = self._positions[edge.a], self._positions[edge.b]
-        x1, x2 = x1 + offset, x2 + offset
         if y1 == y2:
-            return _arc((x1, y1 - _NODE_HEIGHT / 2), (x2, y2 - _NODE_HEIGHT / 2))
-        half = _NODE_HEIGHT / 2 if y2 > y1 else -_NODE_HEIGHT / 2
-        start, end = (x1, y1 + half), (x2, y2 - half)
-        crossed = sorted((y for y in self._nodes if min(y1, y2) < y < max(y1, y2)), reverse=y2 < y1)
-        if not crossed:
-            return _line(start, end)
-        points = [start]
-        for row_y in crossed:
-            x = self._take_channel(row_y, x1 + (x2 - x1) * (row_y - y1) / (y2 - y1))
-            points += [(x, row_y - half), (x, row_y + half)]
-        return _channel_path([*points, end])
+            return _arc((x1, y1 - _NODE_HEIGHT / 2), (x2, y2 - _NODE_HEIGHT / 2), lane)
+        crossed = sorted(y for y in self._nodes if min(y1, y2) < y < max(y1, y2))
+        if crossed and lane.count == 1:
+            return self._single((x1, y1), (x2, y2), crossed[::-1] if y2 < y1 else crossed)
+        upper, lower = ((x1, y1), (x2, y2)) if y1 < y2 else ((x2, y2), (x1, y1))
+        channels = self._bundle(frozenset((edge.a, edge.b)), upper, lower, crossed, lane)
+        half = _NODE_HEIGHT / 2
+        stops = [
+            (upper[0], upper[1] + half),
+            *((x, y + side) for x, y in zip(channels, crossed) for side in (-half, half)),
+            (lower[0], lower[1] - half),
+        ]
+        # Остановки идут парами через промежутки между строками; между парами — отвесный канал.
+        points = [point for gap in range(0, len(stops), 2) for point in _lane_points(*stops[gap : gap + 2], lane)]
+        if y2 < y1:
+            points.reverse()
+        return " ".join(f"{'L' if index else 'M'}{_num(x)} {_num(y)}" for index, (x, y) in enumerate(points)), points
 
-    def _take_channel(self, row_y: float, target: float) -> float:
-        """Ближайший к target x строки вне узлов, затем вне занятых каналов (при равенстве — меньший);
-        выбранный канал занимается."""
-        nodes, channels = self._nodes[row_y], self._channels.setdefault(row_y, [])
-        target = min(max(round(target), self._low), self._high)
+    def _single(self, start: _Point, end: _Point, crossed: Sequence[float]) -> _Route:
+        """Единственная связь пары через строки crossed (в порядке от start к end)."""
+        (x1, y1), (x2, y2) = start, end
+        half = _NODE_HEIGHT / 2 if y2 > y1 else -_NODE_HEIGHT / 2
+        points = [(x1, y1 + half)]
+        for row_y in crossed:
+            x = self._take_channel(row_y, x1 + (x2 - x1) * (row_y - y1) / (y2 - y1), half_width=0)
+            points += [(x, row_y - half), (x, row_y + half)]
+        return _channel_path([*points, (x2, y2 - half)])
+
+    def _bundle(
+        self, pair: frozenset[str], upper: _Point, lower: _Point, crossed: Sequence[float], lane: _Lane
+    ) -> tuple[float, ...]:
+        """Каналы пары в строках crossed (сверху вниз): занимает их первая дорожка пары, сразу на
+        ширину всех дорожек."""
+        if pair not in self._bundles:
+            (x1, y1), (x2, y2) = upper, lower
+            half_width = (lane.count - 1) * _LANE / 2
+            self._bundles[pair] = tuple(
+                self._take_channel(row_y, x1 + (x2 - x1) * (row_y - y1) / (y2 - y1), half_width=half_width)
+                for row_y in crossed
+            )
+        return self._bundles[pair]
+
+    def _take_channel(self, row_y: float, target: float, *, half_width: float) -> float:
+        """Ближайший к target x строки, у которого дорожки на half_width в обе стороны лежат вне узлов,
+        затем вне занятых каналов (при равенстве — меньший); выбранный канал занимается."""
+        nodes = [(left - half_width, right + half_width) for left, right in self._nodes[row_y]]
+        taken = self._channels.setdefault(row_y, [])
+        channels = [(left - half_width, right + half_width) for left, right in taken]
+        low, high = self._low + half_width, self._high - half_width
+        target = min(max(round(target), low), high)
         bounds = (end for block in (*nodes, *channels) for end in block)
-        candidates = [x for x in (target, self._low, self._high, *bounds) if self._low <= x <= self._high]
+        candidates = [x for x in (target, low, high, *bounds) if low <= x <= high]
 
         def cost(x: float) -> tuple[bool, bool, float, float]:
             return (_inside(x, nodes), _inside(x, channels), abs(x - target), x)
 
         channel = min(candidates, key=cost)
-        channels.append((channel - _LANE, channel + _LANE))
+        taken.append((channel - half_width - _LANE, channel + half_width + _LANE))
         return channel
 
 
@@ -253,15 +314,41 @@ def _inside(x: float, blocks: Sequence[tuple[float, float]]) -> bool:
     return any(left < x < right for left, right in blocks)
 
 
-def _line(start: _Point, end: _Point) -> _Route:
-    return f"M{_num(start[0])} {_num(start[1])} L{_num(end[0])} {_num(end[1])}", [start, end]
+def _lane_points(upper: _Point, lower: _Point, lane: _Lane) -> list[_Point]:
+    """Дорожка через промежуток между строками от upper (выше) к lower. Единственная связь пары —
+    отрезок. Дорожки пары сдвинуты по x на lane.offset и вложены друг в друга: каждая идёт от upper
+    отвесно, затем наклонным отрезком, параллельным соседним, затем отвесно к lower. Дорожка, которая
+    отходит дальше в сторону наклона, поворачивает раньше; так соседние дорожки идут не ближе _LANE и
+    на отвесных участках, и поперёк наклонных."""
+    shift = lane.offset
+    lean = (lower[0] > upper[0]) - (lower[0] < upper[0])  # куда идёт связь сверху вниз: -1, 0, 1
+    spread = (lane.count - 1) * _LANE  # сумма двух отвесных участков каждой дорожки
+    drop = spread / 2 - lean * shift  # отвесный участок у upper
+    top, bottom = (upper[0] + shift, upper[1]), (lower[0] + shift, lower[1])
+    corners = [(top[0], top[1] + drop), (bottom[0], bottom[1] - (spread - drop))]
+    return [top, *(corner for corner in corners if corner not in (top, bottom)), bottom]
 
 
-def _arc(start: _Point, end: _Point) -> _Route:
-    """Дуга над узлами между верхними кромками двух лиц одной строки."""
-    control = ((start[0] + end[0]) / 2, start[1] - _ARC_RISE)
-    path = f"M{_num(start[0])} {_num(start[1])} Q{_num(control[0])} {_num(control[1])} {_num(end[0])} {_num(end[1])}"
-    return path, [start, *_curve_points((start, control, end))]
+def _arc(start: _Point, end: _Point, lane: _Lane) -> _Route:
+    """Дуга над узлами между верхними кромками двух лиц одной строки: от узла вверх четвертью
+    окружности, по прямой, четвертью окружности вниз к узлу; радиус равен подъёму. Дорожки пары —
+    концентрические дуги: следующая шире на _LANE с каждой стороны и выше на _LANE, поэтому соседние
+    дорожки везде идут ровно в _LANE друг от друга."""
+    toward = 1 if end[0] >= start[0] else -1
+    span = abs(end[0] - start[0])
+    radius = round(_ARC_RISE + _ARC_SPAN_RISE * math.log2(max(span, _NODE_WIDTH) / _NODE_WIDTH)) + lane.index * _LANE
+    y, top = start[1], start[1] - radius
+    first, last = start[0] - toward * lane.offset, end[0] + toward * lane.offset
+    rise_x, fall_x = first + toward * radius, last - toward * radius  # концы прямой над узлами
+    turn = f"A{radius} {radius} 0 0 {1 if toward > 0 else 0}"
+    path = f"M{_num(first)} {_num(y)} {turn} {_num(rise_x)} {_num(top)} L{_num(fall_x)} {_num(top)} {turn} {_num(last)} {_num(y)}"
+    quarter = [
+        (math.cos(angle), math.sin(angle))
+        for angle in (math.pi / 2 * step / _CURVE_SAMPLES for step in range(_CURVE_SAMPLES + 1))
+    ]
+    points = [(rise_x - toward * radius * cos, y - radius * sin) for cos, sin in quarter]
+    points += [(fall_x + toward * radius * cos, y - radius * sin) for cos, sin in reversed(quarter)]
+    return path, points
 
 
 def _channel_path(points: Sequence[_Point]) -> _Route:
@@ -351,12 +438,8 @@ def _num(value: float) -> str:
 
 
 def _attr(text: str) -> str:
-    """Текст или значение атрибута разметки: знаки C0 заменены пробелом, спецсимволы экранированы."""
-    return html.escape(_printable(text), quote=True)
-
-
-def _printable(text: str) -> str:
-    return text.translate(_CONTROL_TO_SPACE)
+    """Текст или значение атрибута разметки со спецсимволами, экранированными для HTML и XML."""
+    return html.escape(text, quote=True)
 
 
 # --- HTML --------------------------------------------------------------------------------------
@@ -399,11 +482,8 @@ def _line_sample(encoding: _Encoding) -> str:
 def _tree_data(graph: Graph) -> str:
     """JSON для панели; <, > и & записаны JSON-escape, чтобы текст не закрыл <script>."""
     data = {
-        # Ключи — как data-id в SVG (без знаков C0), чтобы щелчок нашёл свою запись.
-        "nodes": {_printable(node.person_id): _node_data(node) for node in graph.nodes},
-        "edges": {
-            _printable(edge.relationship_id): {"title": edge.label, "fields": edge.fields} for edge in graph.edges
-        },
+        "nodes": {node.person_id: _node_data(node) for node in graph.nodes},
+        "edges": {edge.relationship_id: {"title": edge.label, "fields": edge.fields} for edge in graph.edges},
     }
     text = json.dumps(data, ensure_ascii=False)
     return text.replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
@@ -558,8 +638,10 @@ _SCRIPT = """
     if (event.deltaY === 0) { return; }  // горизонтальная прокрутка — не масштаб
     event.preventDefault();
     var point = toSvg(event.clientX, event.clientY);
-    // Шаг 0,9 на 100 пикселей прокрутки (строка — 20 пикселей), не больше трёх шагов за событие.
-    var steps = Math.min(Math.abs(event.deltaY) * (event.deltaMode ? 20 : 1) / 100, 3);
+    // Шаг 0,9 на 100 пикселей прокрутки (строка — 20 пикселей, страница — высота графа на экране),
+    // не больше трёх шагов за событие.
+    var unit = event.deltaMode === 1 ? 20 : event.deltaMode === 2 ? svg.getBoundingClientRect().height : 1;
+    var steps = Math.min(Math.abs(event.deltaY) * unit / 100, 3);
     var factor = Math.pow(0.9, event.deltaY < 0 ? steps : -steps);
     view[0] = point.x - (point.x - view[0]) * factor;
     view[1] = point.y - (point.y - view[1]) * factor;

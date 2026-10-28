@@ -57,15 +57,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         out_dir, stem = case_dir / "tree" / "share", "tree"
     else:
         out_dir, stem = case_dir / "tree" / "private", "tree.private"
+    pdf_path = out_dir / f"{stem}.pdf"
+    # Прежний передаваемый PDF не совпадает с новым графом; его не должны отправить по ошибке, даже
+    # если сборка прервётся, поэтому он удаляется до записи новых файлов.
+    stale_pdf_removed = graph.shareable and _remove(pdf_path)
     svg = render_svg(graph, layout(graph))
     written = _write_outputs(out_dir, stem, _render(graph, svg))
-    pdf_path = out_dir / f"{stem}.pdf"
     pdf_built = not args.no_pdf and _build_pdf(args.chrome, render_print_page(graph, svg), pdf_path)
     if pdf_built:
         written.append(pdf_path)
-    elif graph.shareable and pdf_path.exists():
-        # Прежний передаваемый PDF не совпадает с новым графом; его не должны отправить по ошибке.
-        pdf_path.unlink()
+    elif stale_pdf_removed:
         print(f"Удалён устаревший PDF: {pdf_path}", file=sys.stdout if args.no_pdf else sys.stderr)
     _report_build(written, graph, warnings=len(audit["warnings"]))
     return 0 if pdf_built or args.no_pdf else EXIT_NO_PDF
@@ -108,6 +109,15 @@ def _build_graph(registers: Mapping[str, Register], *, shareable: bool) -> Graph
 def _render(graph: Graph, svg: str) -> dict[str, str]:
     """Тексты выходных файлов по расширению."""
     return {".html": render_html(graph, svg), ".mmd": render_mermaid(graph), ".dot": render_dot(graph)}
+
+
+def _remove(path: Path) -> bool:
+    """Удаляет файл, если он есть; True — файл был."""
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return False
+    return True
 
 
 def _write_outputs(out_dir: Path, stem: str, texts: Mapping[str, str]) -> list[Path]:

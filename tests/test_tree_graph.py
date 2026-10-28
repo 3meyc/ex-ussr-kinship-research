@@ -112,8 +112,8 @@ MERMAID_NODE = re.compile(r'\b(n\d+)\s*[\[({]+\s*"([^"]*)"')
 
 
 class SvgEdges(HTMLParser):
-    """Collects edge groups (attributes of the group merged with its first path), node boxes, edge
-    label texts and the panel data."""
+    """Collects edge groups (attributes of the group merged with its first path), node boxes, node
+    text lines and titles, edge label texts and the panel data."""
 
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
@@ -122,6 +122,8 @@ class SvgEdges(HTMLParser):
         self.node_boxes: list = []  # (left, top, right, bottom) of each node <rect>
         self.box_of: dict = {}  # person_id -> the box of that node's first <rect>
         self.labels: list = []  # [attributes, text] of each edge <text>
+        self.node_texts: dict = {}  # person_id -> text of each <text> of that node
+        self.node_titles: dict = {}  # person_id -> text of that node's <title>
         self.tree_data = None
         self._groups: list = []
         self._node_groups: list = []
@@ -129,6 +131,7 @@ class SvgEdges(HTMLParser):
         self._in_tree_data = False
         self._label = None
         self._node_id = None
+        self._node_part = None  # "text" or "title" while inside one of a node
 
     def handle_starttag(self, tag, attrs):
         values = {name: value or "" for name, value in attrs}
@@ -152,6 +155,12 @@ class SvgEdges(HTMLParser):
         elif tag == "text" and self._groups and self._groups[-1]:
             self._label = [values, ""]
             self.labels.append(self._label)
+        elif tag == "text" and self._node_groups and self._node_groups[-1]:
+            self.node_texts.setdefault(self._node_id, []).append("")
+            self._node_part = "text"
+        elif tag == "title" and self._node_groups and self._node_groups[-1]:
+            self.node_titles[self._node_id] = ""
+            self._node_part = "title"
         elif tag == "path":
             edge_id = next((group for group in reversed(self._groups) if group), None)
             if edge_id and edge_id not in self._with_path:
@@ -166,12 +175,19 @@ class SvgEdges(HTMLParser):
             self._in_tree_data = False
         elif tag == "text":
             self._label = None
+            self._node_part = None
+        elif tag == "title":
+            self._node_part = None
 
     def handle_data(self, data):
         if self._in_tree_data:
             self.tree_data += data
         elif self._label is not None:
             self._label[1] += data
+        elif self._node_part == "text":
+            self.node_texts[self._node_id][-1] += data
+        elif self._node_part == "title":
+            self.node_titles[self._node_id] += data
 
 
 def parse_page(source: str) -> SvgEdges:
@@ -376,6 +392,60 @@ def svg_canvas(svg: ET.Element) -> tuple:
     return (left, top, left + width, top + height)
 
 
+def graph_svg(source: str) -> str:
+    """The SVG of the graph (the one holding the nodes) inside an HTML page."""
+    return next(svg for svg in re.findall(r"<svg\b.*?</svg>", source, re.DOTALL | re.IGNORECASE)
+                if 'class="node"' in svg)
+
+
+def near_ends(point: tuple, points: list) -> bool:
+    return any(math.dist(point, end) <= 10 for end in (points[0], points[-1]))
+
+
+def middle_runs(points: list) -> list:
+    """Runs of consecutive samples of a path farther than 10 px from both of its ends."""
+    runs: list = [[]]
+    for point in points:
+        if near_ends(point, points):
+            if runs[-1]:
+                runs.append([])
+        else:
+            runs[-1].append(point)
+    return [run for run in runs if run]
+
+
+def close_stretch(first: list, second: list) -> float:
+    """Longest length of `first` running within 3 px of `second`, both taken beyond 10 px of their own ends."""
+    others = middle_runs(second)
+    longest = 0.0
+    for run in middle_runs(first):
+        stretch = 0.0
+        for previous, point in zip(run, run[1:]):
+            is_close = all(any(distance_to_polyline(end, other) < 3 for other in others) for end in (previous, point))
+            stretch = stretch + math.dist(previous, point) if is_close else 0.0
+            longest = max(longest, stretch)
+    return longest
+
+
+def distance_to_box(point: tuple, box: tuple) -> float:
+    left, top, right, bottom = box
+    return math.hypot(max(left - point[0], 0.0, point[0] - right), max(top - point[1], 0.0, point[1] - bottom))
+
+
+def pid(number: int) -> str:
+    return f"P-{number:04d}"
+
+
+def people(*numbers: int) -> tuple:
+    return tuple(person(pid(number), f"Лицо {number}", "deceased", "1850", "1920") for number in numbers)
+
+
+def relations(*links: tuple) -> tuple:
+    """Relationships R-0001… for (a, type, b) person numbers, each with a rationale so `other` passes the audit."""
+    return tuple(relation(f"R-{index:04d}", pid(a), kind, pid(b), "hypothesis", "по документам дела")
+                 for index, (a, kind, b) in enumerate(links, 1))
+
+
 # C0 control characters other than the tab and line breaks of file structure, and U+FFFF.
 FORBIDDEN_CHAR = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f￿]")
 
@@ -429,6 +499,15 @@ class CaseTestBase(unittest.TestCase):
             writer = csv.DictWriter(handle, fieldnames=fields)
             writer.writeheader()
             writer.writerows({**row, **changes.get(row[key], {})} for row in rows)
+
+    def write_graph(self, persons: tuple, relationships: tuple) -> None:
+        """Write registers of a graph other than the fixture; the artifacts and the claim cite every person."""
+        everyone = {"person_ids": ";".join(row["person_id"] for row in persons)}
+        self.write_register("claims-register.csv", CLAIMS, "claim_id",
+                            {"C-0001": {"subject_person_ids": everyone["person_ids"]}})
+        self.write_register("person-register.csv", persons, "person_id", {})
+        self.write_register("relationship-register.csv", relationships, "relationship_id", {})
+        self.write_register("artifact-register.csv", ARTIFACTS, "artifact_id", {"A-0001": everyone, "A-0002": everyone})
 
     def run_tree(self, *args: str, env: dict | None = None, case: Path | None = None) -> subprocess.CompletedProcess:
         return subprocess.run(
@@ -544,6 +623,24 @@ class AuditGate(CaseTestBase):
         self.assertIn("cousin-of · R-0006", html.unescape(source))
         edge = parse_page(source).edges["R-0006"]
         self.assertIn(edge.get("marker-end", "none").strip(), ("", "none"))
+
+    def test_ids_colliding_after_cleaning_refuse_build(self):
+        # The id `\x01` is named on stderr raw or by one of the usual escapes.
+        cases = (
+            ("equal after cleaning", (person("P-0009", "Фома Петров", "deceased", "1801", "1870"),
+                                      person("P-0009\x01", "Фома Петров", "deceased", "1802", "1871")),
+             ("P-0009",)),
+            ("empty after cleaning", (person("\x01", "Ерёма Петров", "deceased", "1803", "1872"),),
+             ("\x01", "\\x01", "\\u0001", "U+0001")),
+        )
+        for name, extra, namings in cases:
+            with self.subTest(name):
+                self.write_fixture(extra_persons=extra)
+                proc = self.run_tree("--no-pdf")
+                self.assert_exit(proc, 1)
+                self.assertTrue(any(naming in proc.stderr for naming in namings),
+                                f"stderr names none of {namings}: {proc.stderr!r}")
+                self.assertFalse(self.tree.exists())
 
     def test_missing_case_dir_exit_2(self):
         missing = Path(self.tmp.name) / "no-such-case"
@@ -764,6 +861,71 @@ class EdgeEncoding(CaseTestBase):
                                 f"label box {box} outside canvas {(left, top, right, bottom)}")
 
 
+    def test_edges_of_different_pairs_stay_apart(self):
+        graphs = (
+            ("equal spans", people(*range(5)),
+             relations(*((0, "parent-of", child) for child in range(1, 5)), (1, "sibling-of", 3), (2, "sibling-of", 4))),
+            ("nested spans", people(*range(9)),
+             relations(*((0, "parent-of", child) for child in range(1, 9)), (1, "sibling-of", 7), (1, "sibling-of", 8))),
+        )
+        for name, persons, relationships in graphs:
+            with self.subTest(name):
+                self.write_graph(persons, relationships)
+                self.build()
+                edges = parse_page(graph_svg(self.read("private/tree.private.html"))).edges
+                self.assertEqual(set(edges), {row["relationship_id"] for row in relationships})
+                paths = {rid: path_points(edge["d"]) for rid, edge in sorted(edges.items())}
+                ids = list(paths)
+                stretches = {(rid, other): max(close_stretch(paths[rid], paths[other]),
+                                               close_stretch(paths[other], paths[rid]))
+                             for index, rid in enumerate(ids) for other in ids[index + 1:]}
+                along = [(*pair, round(length, 1)) for pair, length in stretches.items() if length > 12]
+                self.assertEqual(along, [], "edges within 3 px of each other for more than 12 px "
+                                            "beyond 10 px of their ends")
+
+    def test_edge_ends_on_one_side_are_apart(self):
+        page = parse_page(graph_svg(self.read("private/tree.private.html")))
+        box = page.box_of["P-0003"]
+        ends = []
+        for rid in ("R-0001", "R-0006"):
+            points = path_points(page.edges[rid]["d"])
+            self.assertTrue(points)
+            ends.append(min((points[0], points[-1]), key=lambda point: distance_to_box(point, box)))
+        self.assertGreaterEqual(math.dist(*ends), 12, f"R-0001 and R-0006 end at {ends} on P-0003")
+
+    def test_dense_graphs_stay_inside_canvas_and_off_boxes(self):
+        children = range(1, 31)
+        fan = relations(*((0, "parent-of", child) for child in children),
+                        *((child, "other", child + 1) for child in children[:-1]),
+                        (1, "other", 30), (2, "other", 29), (1, "other", 15), (16, "other", 30))
+        pair = relations((1, "spouse-of", 2), *((1, "other", 2),) * 7)
+        # The 23 edges all run from the top row past the middle one.
+        column = relations((1, "parent-of", 2), (2, "parent-of", 3), (1, "grandparent-of", 3), *((1, "other", 3),) * 22)
+        graphs = (("30 children", people(0, *children), fan), ("8 between one pair", people(1, 2), pair),
+                  ("23 across rows in one column", people(1, 2, 3), column))
+        for name, persons, relationships in graphs:
+            with self.subTest(name):
+                self.write_graph(persons, relationships)
+                self.build()
+                svg = graph_svg(self.read("private/tree.private.html"))
+                page = parse_page(svg)
+                self.assertEqual(set(page.edges), {row["relationship_id"] for row in relationships})
+                if name.endswith("one column"):
+                    self.assertEqual(len({box[0] for box in page.node_boxes}), 1, "nodes not in one column")
+                left, top, right, bottom = svg_canvas(ET.fromstring(svg))
+                stray = []
+                for rid, edge in sorted(page.edges.items()):
+                    points = path_points(edge["d"])
+                    self.assertTrue(points, rid)
+                    off_canvas = [point for point in points
+                                  if not (left <= point[0] <= right and top <= point[1] <= bottom)]
+                    in_box = [point for point in points if not near_ends(point, points)
+                              for x0, y0, x1, y1 in page.node_boxes if x0 < point[0] < x1 and y0 < point[1] < y1]
+                    if off_canvas or in_box:
+                        stray.append((rid, off_canvas[:1], in_box[:1]))
+                self.assertEqual(stray, [], "(edge, a point off the canvas, a point inside a node box)")
+
+
 class InteractivePage(CaseTestBase):
     def test_page_has_no_network_references(self):
         self.write_fixture()
@@ -813,6 +975,25 @@ class InteractivePage(CaseTestBase):
                     self.fail(f"SVG is not well-formed XML: {error}")
         labels = [mermaid_text(label) for _, label in MERMAID_NODE.findall(self.read("private/tree.private.mmd"))]
         self.assertTrue(any("Мария &lt; Петрова" in label for label in labels), labels)
+
+    def test_wide_capital_label_is_shortened(self):
+        label = "ЩЕРБАКОВ-ЖУКОВСКИЙ"
+        self.write_fixture(persons={"P-0001": {"preferred_label": label}})
+        self.build()
+        source = self.read("private/tree.private.html")
+        page = parse_page(graph_svg(source))
+        shown = page.node_texts["P-0001"][0]
+        self.assertTrue(shown.endswith("…"), f"node text {shown!r} is not shortened")
+        self.assertTrue(shown[:-1] and label.startswith(shown[:-1]), f"node text {shown!r} is not the label's start")
+        self.assertIn(label, page.node_titles["P-0001"])
+        panel = json.dumps(panel_entries(json.loads(parse_page(source).tree_data), "P-0001"), ensure_ascii=False)
+        self.assertIn(label, panel)
+
+    def test_death_only_years_keep_the_dash(self):
+        self.write_fixture(persons={"P-0003": {"birth_estimate": ""}})
+        self.build()
+        lines = parse_page(graph_svg(self.read("private/tree.private.html"))).node_texts["P-0003"]
+        self.assertIn("–1941", lines)
 
 
 class PrintPage(unittest.TestCase):

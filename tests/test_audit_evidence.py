@@ -24,6 +24,7 @@ ARTIFACT = "{id},,title,url,,,,,,,P-0001,,,,direct,image-of-original,{group},cle
 CLAIM = "{id},text,P-0001,birth,{artifacts},{groups},,{status},moderate,rationale,"
 PERSON = "{id},,,,,,,,,,,,,,,"
 RELATION = "{id},P-0001,parent-of,P-0002,biological,{claims},{artifacts},,{groups},{status},moderate,rationale"
+SEARCH = "{id},,{persons},goal,query,,,,found,{artifacts},,,"
 
 
 class AuditCase(unittest.TestCase):
@@ -314,9 +315,96 @@ class AuditCase(unittest.TestCase):
         self.append("claims-register.csv",
                     CLAIM.format(id="C-0001", artifacts="A-0001", groups="", status="hypothesis"))
         self.append("final-report.md", "Фамилия [неразборчиво], отец [предположительно: Пётр].")
+        self.update_row("person-register.csv", "P-0002", living_status="deceased")
         summary = self.audit()["summary"]
         self.assertEqual(summary["claims_by_status"], {"hypothesis": 1})
+        self.assertEqual(summary["persons_by_living_status"], {"пусто": 1, "deceased": 1})
         self.assertEqual(summary["report_markers"], {"неразборчиво": 1, "предположительно": 1})
+
+    # Каждый ID в реестрах и журнале поиска должен вести к существующей записи.
+
+    def test_person_source_artifacts_must_exist(self):
+        self.two_artifacts()
+        self.update_row("person-register.csv", "P-0001", source_artifact_ids="A-0001;A-0099")
+        errors = self.audit()["errors"]
+        self.assertEqual([e for e in errors if e.startswith("P-0001")],
+                         ["P-0001: неизвестный source_artifact_id A-0099"])
+
+    def test_search_log_references_are_warned(self):
+        self.two_artifacts()
+        self.append("search-log.csv",
+                    SEARCH.format(id="S-0001", persons="P-0001;P-9999", artifacts="A-0001;A-0099"))
+        warnings = self.audit()["warnings"]
+        self.assertEqual([w for w in warnings if w.startswith("S-0001")],
+                         ["S-0001: неизвестный target_person_id P-9999",
+                          "S-0001: неизвестный artifact_id A-0099"])
+
+    def test_search_log_is_optional(self):
+        (self.case / "search-log.csv").unlink()
+        self.assertEqual(self.audit()["errors"], [])
+
+    def test_relationship_needs_two_distinct_people_and_a_type(self):
+        self.append("relationship-register.csv",
+                    RELATION.format(id="R-0001", claims="", artifacts="", groups="", status="hypothesis"))
+        for changes, expected in [
+            ({"person_a_id": ""}, "R-0001: пустой person_a_id"),
+            ({"person_b_id": ""}, "R-0001: пустой person_b_id"),
+            ({"person_b_id": "P-0001"}, "R-0001: person_a_id и person_b_id совпадают: P-0001"),
+            ({"relationship_type": ""}, "R-0001: пустой relationship_type"),
+        ]:
+            with self.subTest(changes=changes):
+                valid = {"person_a_id": "P-0001", "person_b_id": "P-0002", "relationship_type": "parent-of"}
+                self.update_row("relationship-register.csv", "R-0001", **{**valid, **changes})
+                self.assertEqual(self.audit()["errors"], [expected])
+
+    def test_relationship_without_id_is_named_by_its_line(self):
+        self.append("relationship-register.csv",
+                    RELATION.format(id="R-0001", claims="", artifacts="", groups="", status="hypothesis"),
+                    "",
+                    RELATION.format(id="", claims="", artifacts="", groups="", status="invented"))
+        warnings = self.audit()["warnings"]
+        self.assertIn("relationship-register.csv, строка 4: неизвестный статус 'invented'", warnings)
+        self.assertIn("relationship_id: пустой ID в строке 4", warnings)
+
+    # Контролируемые значения: вне набора — предупреждение, не ошибка.
+
+    def test_living_status_values(self):
+        values = ["living", "probably-living", "probably-deceased", "deceased", "unknown", "", "dead"]
+        self.append("person-register.csv", *(
+            f"P-01{number:02d},,{value},,,,,,,,,,,,," for number, value in enumerate(values)
+        ))
+        result = self.audit()
+        self.assertEqual(result["errors"], [])
+        self.assertEqual(result["warnings"], ["P-0106: неизвестное значение living_status 'dead'"])
+
+    def test_relationship_type_values(self):
+        values = ["parent-of", "spouse-of", "sibling-of", "half-sibling-of", "grandparent-of",
+                  "godparent-of", "other", "father-of"]
+        self.append("relationship-register.csv", *(
+            RELATION.format(id=f"R-01{number:02d}", claims="", artifacts="", groups="", status="hypothesis")
+            .replace("parent-of", value, 1)
+            for number, value in enumerate(values)
+        ))
+        result = self.audit()
+        self.assertEqual(result["errors"], [])
+        self.assertEqual(result["warnings"], ["R-0107: неизвестное значение relationship_type 'father-of'"])
+
+    def test_other_relationship_type_needs_rationale(self):
+        self.append("relationship-register.csv",
+                    RELATION.format(id="R-0001", claims="", artifacts="", groups="", status="hypothesis"))
+        self.update_row("relationship-register.csv", "R-0001", relationship_type="other", rationale="")
+        self.assertEqual(self.audit()["warnings"], ["R-0001: relationship_type other без rationale"])
+
+    def test_biological_legal_household_values(self):
+        values = ["biological", "legal", "adoptive", "step", "foster", "household", "unknown", "", "blood"]
+        self.append("relationship-register.csv", *(
+            RELATION.format(id=f"R-01{number:02d}", claims="", artifacts="", groups="", status="hypothesis")
+            .replace("biological", value, 1)
+            for number, value in enumerate(values)
+        ))
+        result = self.audit()
+        self.assertEqual(result["errors"], [])
+        self.assertEqual(result["warnings"], ["R-0108: неизвестное значение biological_legal_household 'blood'"])
 
     # Файл не в UTF-8 или с «;» вместо запятых даёт понятную ошибку, а не трассировку.
 

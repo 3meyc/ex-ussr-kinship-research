@@ -9,8 +9,9 @@ import json
 import re
 import sys
 from collections import Counter
+from collections.abc import Container, Iterable
 from pathlib import Path
-from typing import Iterable
+from typing import NamedTuple
 
 REQUIRED_FILES = {
     "artifact-register.csv": {
@@ -32,6 +33,7 @@ REQUIRED_FILES = {
     "relationship-register.csv": {
         "relationship_id",
         "person_a_id",
+        "relationship_type",
         "person_b_id",
         "claim_ids",
         "supporting_artifact_ids",
@@ -41,6 +43,10 @@ REQUIRED_FILES = {
         "rationale",
     },
     "person-register.csv": {"person_id"},
+}
+# Журнал поиска есть не в каждом деле: проверяется, только если файл существует.
+OPTIONAL_FILES = {
+    "search-log.csv": {"search_id", "target_person_ids", "result_status", "artifact_ids"},
 }
 
 CORROBORATED = {"corroborated", "strongly-corroborated"}
@@ -54,6 +60,43 @@ VALID_CLAIM_STATUSES = {
     "unresolved",
 }
 
+# Контролируемые значения (references/evidence-protocol.md). Пустое значение здесь не проверяется:
+# пустые living_status и biological_legal_household допустимы, пустой relationship_type — отдельная ошибка.
+CONTROLLED_VALUES = {
+    "person-register.csv": {
+        "living_status": {"living", "probably-living", "probably-deceased", "deceased", "unknown"},
+    },
+    "relationship-register.csv": {
+        "relationship_type": {
+            "parent-of",
+            "spouse-of",
+            "sibling-of",
+            "half-sibling-of",
+            "grandparent-of",
+            "godparent-of",
+            "other",
+        },
+        "biological_legal_household": {
+            "biological",
+            "legal",
+            "adoptive",
+            "step",
+            "foster",
+            "household",
+            "unknown",
+        },
+    },
+}
+
+
+class Register(NamedTuple):
+    rows: list[dict[str, str]]
+    lines: list[int]  # номер строки файла для каждой записи rows
+    errors: list[str]
+
+
+EMPTY_REGISTER = Register([], [], [])
+
 
 def split_ids(value: str) -> list[str]:
     if not value:
@@ -62,19 +105,20 @@ def split_ids(value: str) -> list[str]:
     return [part.strip() for part in normalized.split(";") if part.strip()]
 
 
-def read_csv(path: Path, required: set[str]) -> tuple[list[dict[str, str]], list[str]]:
+def read_csv(path: Path, required: set[str]) -> Register:
+    """Строки реестра с номерами строк файла и ошибки чтения."""
     errors: list[str] = []
     try:
         with path.open("r", encoding="utf-8-sig", newline="") as handle:
             reader = csv.DictReader(handle)
             if reader.fieldnames is None:
-                return [], [f"{path.name}: отсутствует строка заголовка"]
+                return Register([], [], [f"{path.name}: отсутствует строка заголовка"])
             if len(reader.fieldnames) == 1 and ";" in reader.fieldnames[0]:
-                return [], [f"{path.name}: разделитель «;» вместо запятой; сохраните файл как CSV с запятыми"]
+                return Register([], [], [f"{path.name}: разделитель «;» вместо запятой; сохраните файл как CSV с запятыми"])
             missing = sorted(required - set(reader.fieldnames))
             if missing:
                 errors.append(f"{path.name}: отсутствуют колонки: {', '.join(missing)}")
-            rows = []
+            rows, lines = [], []
             for row in reader:
                 if None in row:
                     # csv.DictReader складывает лишние поля в ключ None: обычно незакавыченная запятая.
@@ -88,11 +132,60 @@ def read_csv(path: Path, required: set[str]) -> tuple[list[dict[str, str]], list
                         f"({present} из {len(reader.fieldnames)}): значения могли сдвинуться в чужие колонки"
                     )
                 rows.append({k: (v or "").strip() for k, v in row.items()})
-            return rows, errors
+                lines.append(reader.line_num)
+            return Register(rows, lines, errors)
     except UnicodeDecodeError:
-        return [], [f"{path.name}: файл не в UTF-8 (вероятно, cp1251 из Excel); сохраните его как «CSV UTF-8»"]
+        return Register([], [], [f"{path.name}: файл не в UTF-8 (вероятно, cp1251 из Excel); сохраните его как «CSV UTF-8»"])
     except OSError as exc:
-        return [], [f"{path.name}: ошибка чтения: {exc}"]
+        return Register([], [], [f"{path.name}: ошибка чтения: {exc}"])
+
+
+def load_registers(case_dir: Path) -> tuple[dict[str, Register], list[str]]:
+    """Обязательные и имеющиеся необязательные реестры дела; отсутствующий необязательный — пустой."""
+    registers: dict[str, Register] = {}
+    errors: list[str] = []
+    for filename, required in {**REQUIRED_FILES, **OPTIONAL_FILES}.items():
+        path = case_dir / filename
+        if not path.is_file():
+            if filename in REQUIRED_FILES:
+                errors.append(f"Отсутствует обязательный файл: {filename}")
+            registers[filename] = EMPTY_REGISTER
+            continue
+        registers[filename] = read_csv(path, required)
+        errors.extend(registers[filename].errors)
+    return registers, errors
+
+
+def row_label(row: dict[str, str], id_field: str, filename: str, line: int) -> str:
+    """ID записи, а без ID — файл и строка, чтобы сообщение указывало на место."""
+    return row.get(id_field, "") or f"{filename}, строка {line}"
+
+
+def unknown_refs(label: str, field: str, value: str, known: Container[str]) -> list[str]:
+    """Ошибки для ID из поля-списка, которых нет среди известных. field — имя ID в единственном числе."""
+    return [f"{label}: неизвестный {field} {ref}" for ref in split_ids(value) if ref not in known]
+
+
+def controlled_value_warnings(label: str, row: dict[str, str], allowed_by_field: dict[str, set[str]]) -> list[str]:
+    warnings = []
+    for field, allowed in allowed_by_field.items():
+        value = row.get(field, "")
+        if value and value not in allowed:
+            warnings.append(f"{label}: неизвестное значение {field} {value!r}")
+    return warnings
+
+
+def relationship_shape(row: dict[str, str], label: str) -> tuple[list[str], list[str]]:
+    """Связь — два разных лица и тип: ошибки и предупреждения по форме записи."""
+    errors = [f"{label}: пустой {field}" for field in ("person_a_id", "relationship_type", "person_b_id")
+              if not row.get(field, "")]
+    person_a = row.get("person_a_id", "")
+    if person_a and person_a == row.get("person_b_id", ""):
+        errors.append(f"{label}: person_a_id и person_b_id совпадают: {person_a}")
+    warnings = controlled_value_warnings(label, row, CONTROLLED_VALUES["relationship-register.csv"])
+    if row.get("relationship_type", "") == "other" and not row.get("rationale", ""):
+        warnings.append(f"{label}: relationship_type other без rationale")
+    return errors, warnings
 
 
 def duplicate_ids(rows: Iterable[dict[str, str]], field: str) -> list[str]:
@@ -211,61 +304,58 @@ def main() -> int:
         print(f"Ошибка: директория дела не найдена: {case_dir}", file=sys.stderr)
         return 2
 
-    data: dict[str, list[dict[str, str]]] = {}
-    for filename, required in REQUIRED_FILES.items():
-        path = case_dir / filename
-        if not path.is_file():
-            errors.append(f"Отсутствует обязательный файл: {filename}")
-            data[filename] = []
-            continue
-        rows, file_errors = read_csv(path, required)
-        errors.extend(file_errors)
-        data[filename] = rows
+    registers, load_errors = load_registers(case_dir)
+    errors.extend(load_errors)
+    artifacts = registers["artifact-register.csv"].rows
+    claims = registers["claims-register.csv"].rows
+    relationships = registers["relationship-register.csv"].rows
+    persons = registers["person-register.csv"].rows
 
-    artifacts = data["artifact-register.csv"]
-    claims = data["claims-register.csv"]
-    relationships = data["relationship-register.csv"]
-    persons = data["person-register.csv"]
-
-    for rows, field, label in [
-        (artifacts, "artifact_id", "артефакта"),
-        (claims, "claim_id", "утверждения"),
-        (relationships, "relationship_id", "связи"),
-        (persons, "person_id", "лица"),
+    for filename, field, label in [
+        ("artifact-register.csv", "artifact_id", "артефакта"),
+        ("claims-register.csv", "claim_id", "утверждения"),
+        ("relationship-register.csv", "relationship_id", "связи"),
+        ("person-register.csv", "person_id", "лица"),
     ]:
+        rows, lines = registers[filename].rows, registers[filename].lines
         duplicates = duplicate_ids(rows, field)
         if duplicates:
             errors.append(f"Дублирующиеся ID {label}: {', '.join(duplicates)}")
-        for index, row in enumerate(rows, start=2):
+        for line, row in zip(lines, rows):
             if not row.get(field, ""):
-                warnings.append(f"{field}: пустой ID в строке {index}")
+                warnings.append(f"{field}: пустой ID в строке {line}")
 
     artifact_by_id = {row["artifact_id"]: row for row in artifacts if row.get("artifact_id")}
     claim_by_id = {row["claim_id"]: row for row in claims if row.get("claim_id")}
     person_ids = {row["person_id"] for row in persons if row.get("person_id")}
 
+    for line, row in zip(registers["person-register.csv"].lines, persons):
+        label = row_label(row, "person_id", "person-register.csv", line)
+        errors.extend(unknown_refs(label, "source_artifact_id", row.get("source_artifact_ids", ""), artifact_by_id))
+        warnings.extend(controlled_value_warnings(label, row, CONTROLLED_VALUES["person-register.csv"]))
+
+    search_log = registers["search-log.csv"]
+    for line, row in zip(search_log.lines, search_log.rows):
+        label = row_label(row, "search_id", "search-log.csv", line)
+        # Журнал поиска необязателен: его ссылки — предупреждения, не ошибки.
+        warnings.extend(unknown_refs(label, "target_person_id", row.get("target_person_ids", ""), person_ids))
+        warnings.extend(unknown_refs(label, "artifact_id", row.get("artifact_ids", ""), artifact_by_id))
+
     for artifact_id, row in artifact_by_id.items():
         if not row.get("independence_group", "").strip():
             warnings.append(f"{artifact_id}: не указан independence_group")
-        for person_id in split_ids(row.get("person_ids", "")):
-            if person_id not in person_ids:
-                errors.append(f"{artifact_id}: неизвестный person_id {person_id}")
-        for claim_id in split_ids(row.get("related_claim_ids", "")):
-            if claim_id not in claim_by_id:
-                errors.append(f"{artifact_id}: неизвестный related claim_id {claim_id}")
+        errors.extend(unknown_refs(artifact_id, "person_id", row.get("person_ids", ""), person_ids))
+        errors.extend(unknown_refs(artifact_id, "related claim_id", row.get("related_claim_ids", ""), claim_by_id))
 
     for claim_id, row in claim_by_id.items():
         status = row.get("status", "")
         if status not in VALID_CLAIM_STATUSES:
             warnings.append(f"{claim_id}: неизвестный статус {status!r}")
-        for person_id in split_ids(row.get("subject_person_ids", "")):
-            if person_id not in person_ids:
-                errors.append(f"{claim_id}: неизвестный subject_person_id {person_id}")
+        errors.extend(unknown_refs(claim_id, "subject_person_id", row.get("subject_person_ids", ""), person_ids))
         referenced = split_ids(row.get("artifact_ids", ""))
         contradictory = split_ids(row.get("contradicting_artifact_ids", ""))
-        for artifact_id in referenced + contradictory:
-            if artifact_id not in artifact_by_id:
-                errors.append(f"{claim_id}: неизвестный artifact_id {artifact_id}")
+        for field in ("artifact_ids", "contradicting_artifact_ids"):
+            errors.extend(unknown_refs(claim_id, "artifact_id", row.get(field, ""), artifact_by_id))
 
         groups = artifact_groups(referenced, artifact_by_id)
         for group in sorted(set(split_ids(row.get("supporting_independence_groups", "")))):
@@ -295,24 +385,21 @@ def main() -> int:
                 "с указанным происхождением и локатором оригинала, образа или официальной выписки"
             )
 
-    for row in relationships:
-        relation_id = row.get("relationship_id", "<без ID>")
+    for line, row in zip(registers["relationship-register.csv"].lines, relationships):
+        relation_id = row_label(row, "relationship_id", "relationship-register.csv", line)
         status = row.get("status", "")
         if status not in VALID_CLAIM_STATUSES:
             warnings.append(f"{relation_id}: неизвестный статус {status!r}")
+        shape_errors, shape_warnings = relationship_shape(row, relation_id)
+        errors.extend(shape_errors)
+        warnings.extend(shape_warnings)
         for person_field in ("person_a_id", "person_b_id"):
             person_id = row.get(person_field, "")
             if person_id and person_id not in person_ids:
                 errors.append(f"{relation_id}: неизвестный {person_field} {person_id}")
-        for claim_id in split_ids(row.get("claim_ids", "")):
-            if claim_id not in claim_by_id:
-                errors.append(f"{relation_id}: неизвестный claim_id {claim_id}")
-        artifact_refs = split_ids(row.get("supporting_artifact_ids", "")) + split_ids(
-            row.get("contradicting_artifact_ids", "")
-        )
-        for artifact_id in artifact_refs:
-            if artifact_id not in artifact_by_id:
-                errors.append(f"{relation_id}: неизвестный artifact_id {artifact_id}")
+        errors.extend(unknown_refs(relation_id, "claim_id", row.get("claim_ids", ""), claim_by_id))
+        for field in ("supporting_artifact_ids", "contradicting_artifact_ids"):
+            errors.extend(unknown_refs(relation_id, "artifact_id", row.get(field, ""), artifact_by_id))
         # Группа засчитывается, только если за ней стоит артефакт: прямой или через claim_ids.
         backing_ids = split_ids(row.get("supporting_artifact_ids", ""))
         contradictory = set(split_ids(row.get("contradicting_artifact_ids", "")))
@@ -370,31 +457,23 @@ def main() -> int:
         report_errors, markers = audit_report(report_text, known_ids, statuses)
         errors.extend(report_errors)
 
-    # Журнал поисков необязателен; находка без артефакта — предупреждение.
-    search_rows: list[dict[str, str]] = []
-    search_log = case_dir / "search-log.csv"
-    if search_log.is_file():
-        search_rows, search_errors = read_csv(search_log, {"search_id", "result_status", "artifact_ids"})
-        warnings.extend(search_errors)
-        for row in search_rows:
-            for artifact_id in split_ids(row.get("artifact_ids", "")):
-                if artifact_id not in artifact_by_id:
-                    warnings.append(
-                        f"{row.get('search_id') or '<без ID>'}: неизвестный artifact_id {artifact_id} в журнале поиска"
-                    )
-            if row.get("result_status", "").strip().casefold() == "found" and not row.get(
-                "artifact_ids", ""
-            ).strip():
-                warnings.append(
-                    f"{row.get('search_id') or '<без ID>'}: result_status=found, но artifact_ids пуст — "
-                    "находка не зарегистрирована как артефакт"
-                )
+    # Находка без артефакта — предупреждение.
+    search_rows = registers["search-log.csv"].rows
+    for row in search_rows:
+        if row.get("result_status", "").strip().casefold() == "found" and not row.get("artifact_ids", "").strip():
+            warnings.append(
+                f"{row.get('search_id') or '<без ID>'}: result_status=found, но artifact_ids пуст — "
+                "находка не зарегистрирована как артефакт"
+            )
 
     # Сводка готовности: что ещё не снято. Не ошибки — для решения, выдавать ли отчёт.
     summary = {
         "claims_by_status": dict(Counter(row.get("status", "") or "пусто" for row in claims)),
         "relationships_by_status": dict(
             Counter(row.get("status", "") or "пусто" for row in relationships)
+        ),
+        "persons_by_living_status": dict(
+            Counter(row.get("living_status", "") or "пусто" for row in persons)
         ),
         "report_markers": markers,
     }
@@ -429,6 +508,8 @@ def main() -> int:
             line = ", ".join(f"{status}={counts[status]}" for status in sorted(counts))
             pending = sum(counts.get(status, 0) for status in open_statuses)
             print(f"- {label}: {line or 'нет'}; без кроссподтверждения: {pending}")
+        living = summary["persons_by_living_status"]
+        print("- лица по living_status: " + (", ".join(f"{key}={living[key]}" for key in sorted(living)) or "нет"))
         if markers:
             print("- в отчёте: " + ", ".join(f"[{name}]={count}" for name, count in markers.items()))
         if errors:

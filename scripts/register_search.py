@@ -47,6 +47,16 @@ def next_id(rows, field, prefix):
     return f"{prefix}{max(numbers, default=0) + 1:04d}"
 
 
+def stored_path(path, case):
+    """Путь для реестров дела: внутри дела — относительный, иначе как задан, без раскрытия `~`.
+
+    Абсолютный путь выдавал бы имя пользователя и устройство папок при передаче дела."""
+    try:
+        return str(Path(path).expanduser().resolve().relative_to(case))
+    except ValueError:
+        return str(path)
+
+
 def encode(value):
     return json.dumps(value, ensure_ascii=False, sort_keys=True)
 
@@ -223,7 +233,7 @@ def register(case, input_path, goal):
             row = {field: "" for field in artifact_fields}
             row.update({key: value for key, value in item.items() if key in row})
             row.update({"artifact_id": artifact_id, "captured_at": item["captured_at"] or timestamp(),
-                        "source_url_or_path": item["source_url_or_path"] or str(snapshot),
+                        "source_url_or_path": item["source_url_or_path"] or str(snapshot.relative_to(case)),
                         "source_type": "unknown" if source == "manual" else "index",
                         "originality": "unknown" if source == "manual" else "index",
                         "directness": "lead-only", "status": "lead-only",
@@ -252,7 +262,7 @@ def register(case, input_path, goal):
                         "query": encode(data.get("query", {"apid": data.get("apid")})),
                         "source_or_domain": {"familysearch": "familysearch.org", "gwar": "gwar.mil.ru"}.get(source) or data["source_or_domain"],
                         "filters": encode({"key": log_marker, "coverage": coverage, "entities": data.get("entities"),
-                                           "input": str(Path(input_path).expanduser().resolve()), "sha256": hashlib.sha256(input_bytes).hexdigest()}),
+                                           "input": stored_path(input_path, case), "sha256": hashlib.sha256(input_bytes).hexdigest()}),
                         "result_status": status, "artifact_ids": ";".join(artifact_ids),
                         "blocker": encode(data["blocked"]) if data.get("blocked") else "",
                         "next_step": "Проверить оригиналы, различить кандидатов и установить независимость; покрытие ограничено указанным набором."})

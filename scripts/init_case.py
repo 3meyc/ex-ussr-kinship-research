@@ -66,7 +66,8 @@ def main() -> int:
         print(f"Ошибка: {case_dir} существует и не является директорией.", file=sys.stderr)
         return 2
 
-    case_dir.mkdir(parents=True, exist_ok=True)
+    # Семейные данные: новое дело доступно только владельцу; права существующей папки не меняются.
+    case_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     conflicts = [dest for dest in ASSET_FILES.values() if (case_dir / dest).exists()]
     if conflicts and not args.force:
         print(

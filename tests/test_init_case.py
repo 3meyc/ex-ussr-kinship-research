@@ -1,10 +1,11 @@
-"""Тесты init_case.py: сброс шаблонов через --force не теряет данные дела.
+"""Тесты init_case.py: права нового дела; сброс шаблонов через --force не теряет данные дела.
 
 Запуск: python3 -m unittest discover -s tests
 """
 
 from __future__ import annotations
 
+import stat
 import subprocess
 import sys
 import tempfile
@@ -22,6 +23,23 @@ def init(case: Path, *extra: str) -> subprocess.CompletedProcess:
          "--research-question", "q", *extra],
         capture_output=True, text=True, encoding="utf-8", check=False,   # tests assert the exit code
     )
+
+
+class CaseDirectoryPermissions(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.case = Path(self.tmp.name) / "case"
+
+    def test_new_case_directory_is_owner_only(self):
+        self.assertEqual(init(self.case).returncode, 0)
+        self.assertEqual(stat.S_IMODE(self.case.stat().st_mode), 0o700)
+
+    def test_existing_directory_keeps_its_permissions(self):
+        self.case.mkdir()
+        self.case.chmod(0o750)
+        self.assertEqual(init(self.case).returncode, 0)
+        self.assertEqual(stat.S_IMODE(self.case.stat().st_mode), 0o750)
 
 
 class ForceKeepsCaseData(unittest.TestCase):

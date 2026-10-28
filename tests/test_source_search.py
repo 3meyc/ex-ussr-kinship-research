@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -243,6 +244,30 @@ class RegistrationTests(unittest.TestCase):
         common.save_json(path, result)
         self.assertEqual(register_search.register(self.case, path, "goal")["added_artifacts"], 1)
         self.assertEqual(len(self.rows("artifact-register.csv")), 2)
+
+    def unlocated_analysis(self):
+        # Без browser_url и ark артефакт указывает на локальный снимок источника.
+        return {"source": "familysearch", "coverage": {"complete": True},
+                "candidates": [{"rid": "LOCAL-1", "record": {"persons": {"p1": {"name": "Иван Иванов"}}}}]}
+
+    def test_paths_inside_the_case_are_stored_relative_to_it(self):
+        path = self.case / "imports" / "analysis.json"
+        common.save_json(path, self.unlocated_analysis())
+        register_search.register(self.case, path, "goal")
+        artifact = self.rows("artifact-register.csv")[0]
+        snapshot = artifact["source_url_or_path"]
+        self.assertTrue(snapshot.startswith("sources/familysearch/"), snapshot)
+        self.assertTrue((self.case / snapshot).is_file())
+        log_filters = json.loads(self.rows("search-log.csv")[0]["filters"])
+        self.assertEqual(log_filters["input"], "imports/analysis.json")
+
+    def test_input_outside_the_case_keeps_tilde_unexpanded(self):
+        home = self.directory / "home"
+        common.save_json(home / "analysis.json", self.unlocated_analysis())
+        with patch.dict(os.environ, {"HOME": str(home)}):
+            register_search.register(self.case, "~/analysis.json", "goal")
+        log_filters = json.loads(self.rows("search-log.csv")[0]["filters"])
+        self.assertEqual(log_filters["input"], "~/analysis.json")
 
     def test_partial_empty_result_is_not_negative_evidence(self):
         result = self.result()

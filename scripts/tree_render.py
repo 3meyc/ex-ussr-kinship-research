@@ -131,6 +131,9 @@ def _label_anchor(
             sum(_overlap(box, other) for other in label_boxes),
         )
 
+    for anchor in anchors:
+        if hits(anchor) == (0, 0):
+            return anchor
     return min(anchors, key=hits)
 
 
@@ -148,9 +151,9 @@ def _overlap(first: _Box, second: _Box) -> bool:
 def _svg_edge(edge: Edge, path: str, anchor: tuple[int, int]) -> str:
     label_x, label_y = anchor
     encoding = _ENCODINGS[edge.status]
-    style = f' stroke="{encoding.colour}" stroke-width="{_num(encoding.width)}"'
+    style = _stroke_attrs(encoding)
     if encoding.dash:
-        style += f' stroke-dasharray="{encoding.dash}" stroke-linecap="round"'
+        style += ' stroke-linecap="round"'
     if edge.directed:
         style += f' marker-end="url(#arrow-{edge.status})"'
     # Первый <path> — видимая линия со стилем; второй — широкая прозрачная зона для щелчка.
@@ -161,6 +164,14 @@ def _svg_edge(edge: Edge, path: str, anchor: tuple[int, int]) -> str:
         f'<text x="{label_x}" y="{label_y}" text-anchor="middle" font-size="{_LABEL_SIZE}" fill="{_INK}" '
         f'stroke="#ffffff" stroke-width="3" paint-order="stroke">{_attr(edge.label)}</text></g>'
     )
+
+
+def _stroke_attrs(encoding: _Encoding) -> str:
+    """Цвет, толщина и штрих линии статуса — атрибуты SVG (их сохраняет и PDF)."""
+    style = f' stroke="{encoding.colour}" stroke-width="{_num(encoding.width)}"'
+    if encoding.dash:
+        style += f' stroke-dasharray="{encoding.dash}"'
+    return style
 
 
 def _edge_geometry(
@@ -231,18 +242,20 @@ def _attr(text: str) -> str:
 
 def render_html(graph: Graph, svg: str) -> str:
     """Страница без внешних ресурсов: SVG, панель сведений, легенда, данные панели в JSON."""
-    mode = "shareable" if graph.shareable else "private"
     canvas = svg if graph.nodes else f'<p class="empty">{EMPTY_NOTE}</p>'
     return _PAGE.format(
-        title=TITLE,
+        **_header(graph),
         style=_STYLE,
-        mode=mode,
-        banner=_attr(banner(graph)),
         canvas=canvas,
         legend=_legend(),
         data=_tree_data(graph),
         script=_SCRIPT,
     )
+
+
+def _header(graph: Graph) -> dict[str, str]:
+    """Заголовок, режим и баннер — общие для интерактивной страницы и страницы печати."""
+    return {"title": TITLE, "mode": "shareable" if graph.shareable else "private", "banner": _attr(banner(graph))}
 
 
 def _legend() -> str:
@@ -255,11 +268,9 @@ def _legend() -> str:
 
 def _line_sample(encoding: _Encoding) -> str:
     """Образец линии статуса для легенды — самостоятельный SVG (годится и для <img>)."""
-    dash = f' stroke-dasharray="{encoding.dash}"' if encoding.dash else ""
     return (
         '<svg xmlns="http://www.w3.org/2000/svg" width="48" height="12" aria-hidden="true">'
-        f'<line x1="2" y1="6" x2="46" y2="6" stroke="{encoding.colour}" '
-        f'stroke-width="{_num(encoding.width)}"{dash}/></svg>'
+        f'<line x1="2" y1="6" x2="46" y2="6"{_stroke_attrs(encoding)}/></svg>'
     )
 
 
@@ -442,16 +453,13 @@ def render_print_page(graph: Graph, svg: str) -> str:
     """Статичная страница для build_pdf.print_pdf: заголовок, баннер, граф и легенда на первой
     странице. Только теги из build_pdf.STATIC_TAGS; граф и образцы линий — SVG в <img> с адресом
     data:, поэтому текст реестров не попадает в разметку и не похож на незаполненный <…>."""
-    mode = "shareable" if graph.shareable else "private"
     if graph.nodes:
         canvas = f'<img class="graph" src="{_svg_data_uri(svg)}" alt="{TITLE}">'
     else:
         canvas = f"<p>{EMPTY_NOTE}</p>"
     return _PRINT_PAGE.format(
-        title=TITLE,
+        **_header(graph),
         style=_PRINT_STYLE,
-        mode=mode,
-        banner=_attr(banner(graph)),
         canvas=canvas,
         legend=_print_legend(),
     )
@@ -520,17 +528,16 @@ def render_mermaid(graph: Graph) -> str:
         if node.years:
             label += "<br/>" + _mermaid_text(node.years)
         lines.append(f'    {node_ids[node.person_id]}["{label}"]')
-    for edge in graph.edges:
+    link_styles = []
+    for index, edge in enumerate(graph.edges):
         encoding = _ENCODINGS[edge.status]
         link = encoding.mermaid_directed if edge.directed else encoding.mermaid_undirected
         lines.append(f'    {node_ids[edge.a]} {link}|"{_mermaid_text(edge.label)}"| {node_ids[edge.b]}')
-    for index, edge in enumerate(graph.edges):
-        encoding = _ENCODINGS[edge.status]
         style = f"stroke:{encoding.colour},stroke-width:{_num(encoding.width)}px"
         if encoding.dash:
             style += f",stroke-dasharray:{encoding.dash}"
-        lines.append(f"    linkStyle {index} {style}")
-    return "\n".join(lines) + "\n"
+        link_styles.append(f"    linkStyle {index} {style}")
+    return "\n".join(lines + link_styles) + "\n"
 
 
 def _mermaid_text(text: str) -> str:
@@ -567,4 +574,4 @@ def render_dot(graph: Graph) -> str:
 def _dot_text(text: str) -> str:
     """Строка DOT в кавычках: \\ и " экранированы, переводы строк — \\n."""
     escaped = text.replace("\\", "\\\\").replace('"', '\\"')
-    return "\\n".join(escaped.splitlines()) if escaped else ""
+    return "\\n".join(escaped.splitlines())

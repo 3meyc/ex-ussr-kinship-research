@@ -17,7 +17,7 @@ from collections.abc import Mapping, Sequence
 from datetime import date
 from pathlib import Path
 
-from audit_evidence import audit_case, load_registers
+from audit_evidence import Register, audit_registers, load_registers
 from build_pdf import find_chrome, print_pdf
 from research_common import atomic_bytes
 from tree_layout import layout
@@ -44,12 +44,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         return EXIT_NO_CASE
     case_dir = case_dir.resolve()
 
-    audit = audit_case(case_dir)
+    registers, load_errors = load_registers(case_dir)
+    audit = audit_registers(case_dir, registers, load_errors)
     if audit["errors"]:
         _report_audit_errors(audit["errors"], case_dir)
         return EXIT_AUDIT_ERRORS
 
-    graph = _load_graph(case_dir, shareable=args.exclude_living)
+    graph = _build_graph(registers, shareable=args.exclude_living)
     stem = "tree" if graph.shareable else "tree.private"
     tree_dir = case_dir / "tree"
     svg = render_svg(graph, layout(graph))
@@ -89,8 +90,8 @@ def _report_audit_errors(errors: Sequence[str], case_dir: Path) -> None:
     print(f"Все ошибки: {command}", file=sys.stderr)
 
 
-def _load_graph(case_dir: Path, *, shareable: bool) -> Graph:
-    registers, _ = load_registers(case_dir)  # ошибки чтения уже отсеял аудит
+def _build_graph(registers: Mapping[str, Register], *, shareable: bool) -> Graph:
+    """Граф из тех же строк реестров, что прошли аудит."""
     return build_graph(
         registers["person-register.csv"].rows,
         registers["relationship-register.csv"].rows,
@@ -137,12 +138,11 @@ def _build_pdf(chrome: str | None, page: str, pdf_path: Path) -> bool:
         page_path, printed = Path(staging) / "print.html", Path(staging) / pdf_path.name
         page_path.write_text(page, encoding="utf-8")
         code = print_pdf(browser, page_path, printed)
-        if not code:
-            printed.chmod(0o600)
-            os.replace(printed, pdf_path)
-    if code:
-        print(f"PDF не построен: браузер {browser} не смог напечатать граф (код {code}).", file=sys.stderr)
-        return False
+        if code:
+            print(f"PDF не построен: браузер {browser} не смог напечатать граф (код {code}).", file=sys.stderr)
+            return False
+        printed.chmod(0o600)
+        os.replace(printed, pdf_path)
     return True
 
 

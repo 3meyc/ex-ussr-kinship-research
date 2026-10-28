@@ -296,11 +296,14 @@ def parse_args() -> argparse.Namespace:
 
 def audit_case(case_dir: Path) -> dict:
     """Audit a resolved case directory; the result is what `--json` prints."""
-    errors: list[str] = []
+    return audit_registers(case_dir, *load_registers(case_dir))
+
+
+def audit_registers(case_dir: Path, registers: dict[str, Register], load_errors: list[str]) -> dict:
+    """Audit registers already read by `load_registers`, so a caller can reuse the same rows."""
+    errors: list[str] = list(load_errors)
     warnings: list[str] = []
 
-    registers, load_errors = load_registers(case_dir)
-    errors.extend(load_errors)
     artifacts = registers["artifact-register.csv"].rows
     claims = registers["claims-register.csv"].rows
     relationships = registers["relationship-register.csv"].rows
@@ -513,9 +516,9 @@ def main() -> int:
         open_statuses = ("hypothesis", "single-source", "unresolved", "contradicted", "пусто")
         print("\nСВОДКА:")
         for label, key in [("утверждения", "claims_by_status"), ("связи", "relationships_by_status")]:
-            counts = summary[key]
-            line = ", ".join(f"{status}={counts[status]}" for status in sorted(counts))
-            pending = sum(counts.get(status, 0) for status in open_statuses)
+            by_status = summary[key]
+            line = ", ".join(f"{status}={by_status[status]}" for status in sorted(by_status))
+            pending = sum(by_status.get(status, 0) for status in open_statuses)
             print(f"- {label}: {line or 'нет'}; без кроссподтверждения: {pending}")
         living = summary["persons_by_living_status"]
         print("- лица по living_status: " + (", ".join(f"{key}={living[key]}" for key in sorted(living)) or "нет"))

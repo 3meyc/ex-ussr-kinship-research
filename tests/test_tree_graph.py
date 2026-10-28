@@ -354,6 +354,47 @@ def path_points(d: str, steps: int = 64) -> list:
     return points
 
 
+def distance_to_polyline(point: tuple, polyline: list) -> float:
+    """Shortest distance from `point` to the segments joining the samples of a path."""
+    best = math.inf
+    for (ax, ay), (bx, by) in zip(polyline, polyline[1:] or polyline):
+        dx, dy = bx - ax, by - ay
+        length = dx * dx + dy * dy
+        t = 0.0 if length == 0 else max(0.0, min(1.0, ((point[0] - ax) * dx + (point[1] - ay) * dy) / length))
+        best = min(best, math.hypot(point[0] - ax - t * dx, point[1] - ay - t * dy))
+    return best
+
+
+def svg_canvas(svg: ET.Element) -> tuple:
+    """(left, top, right, bottom) of the SVG canvas in user units: the viewBox, else width and height."""
+    view_box = svg.get("viewBox")
+    if view_box:
+        left, top, width, height = (float(value) for value in re.split(r"[\s,]+", view_box.strip()))
+    else:
+        left, top = 0.0, 0.0
+        width, height = (float(re.match(r"[\d.]+", svg.get(name)).group()) for name in ("width", "height"))
+    return (left, top, left + width, top + height)
+
+
+# C0 control characters other than the tab and line breaks of file structure, and U+FFFF.
+FORBIDDEN_CHAR = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f￿]")
+
+
+def forbidden_characters(text: str, *, mermaid: bool = False) -> list:
+    """Forbidden characters in `text`, written raw or as numeric references (`&#1;`, `&#xFFFF;`, and
+    Mermaid's `#1;` when `mermaid`)."""
+    found = FORBIDDEN_CHAR.findall(text)
+    references = [(match.group(1), 16) for match in re.finditer(r"&#[xX]([0-9a-fA-F]+);", text)]
+    references += [(match.group(1), 10) for match in re.finditer(r"&#(\d+);", text)]
+    if mermaid:
+        references += [(match.group(1), 10) for match in re.finditer(r"(?<![&\w])#(\d+);", text)]
+    for digits, base in references:
+        code = int(digits, base)
+        if code <= 0x10FFFF and FORBIDDEN_CHAR.match(chr(code)):
+            found.append(chr(code))
+    return found
+
+
 def ids_by_person(labels: dict) -> dict:
     """Map person_id -> graph node id by the preferred_label inside each node label."""
     return {pid: node_id for node_id, label in labels.items() for pid, name in NAMES.items() if name in label}
@@ -664,13 +705,63 @@ class EdgeEncoding(CaseTestBase):
         self.build()
         edges = parse_page(self.read("private/tree.private.html")).edges
         with self.subTest("parallel edges"):
-            self.assertNotEqual(edges["R-0008"]["d"], edges["R-0005"]["d"])
+            self.assert_lanes_apart(edges, "R-0008", "R-0005")
         with self.subTest("long edge over a node"):
             left, top, right, bottom = parse_page(self.read("private/tree.private.html")).box_of["P-0003"]
             points = path_points(edges["R-0007"]["d"])
             self.assertTrue(points)
             inside = [point for point in points if left < point[0] < right and top < point[1] < bottom]
             self.assertEqual(inside[:3], [], f"R-0007 ({edges['R-0007']['d']}) crosses P-0003's box")
+
+    def assert_lanes_apart(self, edges: dict, rid: str, other: str) -> None:
+        """Every sample of `rid` beyond 10 px of its ends lies at least 3 px from the path of `other`."""
+        first, second = path_points(edges[rid]["d"]), path_points(edges[other]["d"])
+        self.assertTrue(first)
+        self.assertTrue(second)
+        ends = (first[0], first[-1])
+        middle = [point for point in first if all(math.dist(point, end) > 10 for end in ends)]
+        self.assertTrue(middle, f"{rid} ({edges[rid]['d']}) has no part beyond 10 px of its ends")
+        closest = min(distance_to_polyline(point, second) for point in middle)
+        self.assertGreaterEqual(closest, 3, f"{rid} ({edges[rid]['d']}) runs {closest:.2f} px from "
+                                            f"{other} ({edges[other]['d']})")
+
+    def test_lanes_stay_apart(self):
+        self.write_fixture(extra_relationships=(
+            relation("R-0008", "P-0001", "other", "P-0002", "hypothesis", "свидетели на свадьбе"),
+            relation("R-0009", "P-0002", "godparent-of", "P-0003", "hypothesis", "восприемница в метрике")))
+        self.build()
+        page = parse_page(self.read("private/tree.private.html"))
+        boxes = page.box_of
+        with self.subTest("layout"):
+            self.assertEqual(boxes["P-0001"][1], boxes["P-0002"][1], "P-0001 and P-0002 are not in one row")
+            self.assertGreater(boxes["P-0003"][1], boxes["P-0002"][3], "P-0003 is not in a row below P-0002")
+            self.assertNotEqual(boxes["P-0002"][0], boxes["P-0003"][0], "P-0002 and P-0003 share an x")
+        for rid, other in (("R-0008", "R-0002"), ("R-0009", "R-0003")):
+            with self.subTest(f"{rid} beside {other}"):
+                self.assert_lanes_apart(page.edges, rid, other)
+
+    def test_edge_labels_stay_on_canvas(self):
+        column = tuple(row for row in PERSONS if row["person_id"] in ("P-0001", "P-0002", "P-0003"))
+        chain = (relation("R-0001", "P-0001", "parent-of", "P-0002", "corroborated", "метрика"),
+                 relation("R-0002", "P-0002", "parent-of", "P-0003", "corroborated", "метрика"),
+                 relation("R-0003", "P-0001", "grandparent-of", "P-0003", "corroborated", "метрика"))
+        self.write_register("person-register.csv", column, "person_id", {})
+        self.write_register("relationship-register.csv", chain, "relationship_id", {})
+        self.write_register("artifact-register.csv", ARTIFACTS, "artifact_id",
+                            {"A-0001": {"person_ids": "P-0001;P-0002;P-0003"}})
+        self.build()
+        source = self.read("private/tree.private.html")
+        graph = next(svg for svg in re.findall(r"<svg\b.*?</svg>", source, re.DOTALL | re.IGNORECASE)
+                     if 'data-id="R-0003"' in svg)
+        left, top, right, bottom = svg_canvas(ET.fromstring(graph))
+        labels = parse_page(graph).labels
+        self.assertEqual(sorted(text for _, text in labels),
+                         ["grandparent-of · R-0003", "parent-of · R-0001", "parent-of · R-0002"])
+        for attrs, text in labels:
+            with self.subTest(text):
+                box = label_box(attrs, text)
+                self.assertTrue(left <= box[0] and top <= box[1] and box[2] <= right and box[3] <= bottom,
+                                f"label box {box} outside canvas {(left, top, right, bottom)}")
 
 
 class InteractivePage(CaseTestBase):
@@ -700,9 +791,19 @@ class InteractivePage(CaseTestBase):
 
     def test_control_characters_keep_svg_well_formed(self):
         self.write_fixture(persons={"P-0001": {"preferred_label": "Иван\x0bПетров"},
-                                    "P-0002": {"preferred_label": "Мария &lt; Петрова"}})
+                                    "P-0002": {"preferred_label": "Мария &lt; Петрова"},
+                                    "P-0003": {"preferred_label": "Пётр￿Петров"},
+                                    "P-0005": {"preferred_label": "Ольга\x01Петрова"}})
         self.build()
-        svgs = re.findall(r"<svg\b.*?</svg>", self.read("private/tree.private.html"), re.DOTALL | re.IGNORECASE)
+        source = self.read("private/tree.private.html")
+        data = json.dumps(json.loads(parse_page(source).tree_data), ensure_ascii=False)
+        outputs = {"html": forbidden_characters(source + "\n" + data),
+                   "mmd": forbidden_characters(self.read("private/tree.private.mmd"), mermaid=True),
+                   "dot": forbidden_characters(self.read("private/tree.private.dot"))}
+        for name, found in outputs.items():
+            with self.subTest(name):
+                self.assertEqual(found, [], f"control characters or U+FFFF in {name}")
+        svgs = re.findall(r"<svg\b.*?</svg>", source, re.DOTALL | re.IGNORECASE)
         self.assertTrue(svgs)
         for index, svg in enumerate(svgs):
             with self.subTest(svg=index):

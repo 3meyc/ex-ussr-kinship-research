@@ -119,7 +119,6 @@ def _report_id_conflicts(error: IdConflictError) -> None:
     )
 
 
-
 def _build_graph(registers: Mapping[str, Register], *, shareable: bool) -> Graph:
     """Граф из тех же строк реестров, что прошли аудит."""
     return build_graph(

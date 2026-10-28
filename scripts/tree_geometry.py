@@ -286,11 +286,11 @@ def _ports(
         centre = grid.xs[person_id]
         row = grid.row_of[person_id] + (1 if side == "bottom" else -1)
         near = row_channels.get(row, ())
+        own = [_own_start(channels.get(index, ()), end, half[index]) for _, index, end in entries]
         starts = None
         if gap == _LANE and all(step == _LANE or count == 1 for count, step in zip(counts, steps)):
-            starts = _phase_starts(centre, counts, _PHASE[side], near)
+            starts = _phase_starts(centre, counts, _PHASE[side], near, own)
         if starts is None:
-            own = [_own_start(channels.get(index, ()), end, half[index]) for _, index, end in entries]
             starts = _packed_starts(centre, counts, steps, gap, near, own)
         for (_, index, end), start in zip(entries, starts):
             ports[index, end] = start + half[index]
@@ -343,12 +343,17 @@ def _packed_starts(
 
 
 def _phase_starts(
-    centre: int, counts: Sequence[int], phase: int, channels: Sequence[tuple[int, int]]
+    centre: int,
+    counts: Sequence[int],
+    phase: int,
+    channels: Sequence[tuple[int, int]],
+    own: Sequence[int | None],
 ) -> list[int] | None:
     """x первой дорожки каждого пучка стороны, где все дорожки стоят на сетке _LANE со сдвигом phase,
     подряд и не ближе _NEAR к каналам channels ((x, половина ширины)); из таких раскладок в пределах
-    ±_END_REACH от середины стороны — та, что ближе всего к середине. Свой канал пучка тоже
-    отодвигает его порты: иначе порт встаёт в 1–5 px от канала и путь делает едва заметный излом.
+    ±_END_REACH от середины стороны — та, что ближе всего к середине. Пучок может встать ровно на свой
+    канал (первая дорожка в own): тогда он идёт к нему отвесно, без излома; в 1–5 px от своего
+    канала его порты не встают, иначе путь сделал бы едва заметный излом.
     None — если ни одна раскладка не помещается в ±_END_REACH (каналы теснят порты к краю узла)."""
     total = sum(counts)
     base = _snap(centre - (total - 1) * _LANE // 2, phase)
@@ -358,8 +363,8 @@ def _phase_starts(
 
     def pack(first: int) -> list[int]:
         slots, slot = [], first
-        for count in counts:
-            while any(blocked(slot + lane) for lane in range(count)):
+        for count, own_start in zip(counts, own):
+            while base + slot * _LANE != own_start and any(blocked(slot + lane) for lane in range(count)):
                 slot += 1
             slots.append(slot)
             slot += count

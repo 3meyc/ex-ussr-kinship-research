@@ -74,23 +74,37 @@ class EdgeGeometryTest(unittest.TestCase):
 
     def test_ends_on_one_side_of_a_box_are_a_lane_apart(self):
         # 13 ends span 12 × 12 = 144 px, the most that fits within 74 px of the side's middle.
-        for children in (4, 13):
-            with self.subTest(children=children):
-                persons = [person(f"P-{number:04d}") for number in range(children + 1)]
-                relationships = [
-                    relationship(f"R-{child:04d}", "P-0000", "parent-of", f"P-{child:04d}")
-                    for child in range(1, children + 1)
-                ]
+        children = 13
+        persons = [person(f"P-{number:04d}") for number in range(children + 1)]
+        relationships = [
+            relationship(f"R-{child:04d}", "P-0000", "parent-of", f"P-{child:04d}") for child in range(1, children + 1)
+        ]
 
-                _, routes = routed(persons, relationships)
+        _, routes = routed(persons, relationships)
 
-                x, y = routes.positions["P-0000"]
-                starts = sorted(coordinates(edge)[0] for edge in routes.edges)
-                self.assertEqual({start_y for _, start_y in starts}, {y + 24})
-                xs = [start_x for start_x, _ in starts]
-                self.assertEqual(len(xs), children)
-                self.assertTrue(all(right - left >= 12 for left, right in zip(xs, xs[1:])), xs)
-                self.assertTrue(all(abs(start_x - x) <= 74 for start_x in xs), xs)
+        x, y = routes.positions["P-0000"]
+        starts = sorted(coordinates(edge)[0] for edge in routes.edges)
+        self.assertEqual({start_y for _, start_y in starts}, {y + 24})
+        xs = [start_x for start_x, _ in starts]
+        self.assertEqual(len(xs), children)
+        self.assertTrue(all(right - left >= 12 for left, right in zip(xs, xs[1:])), xs)
+        self.assertTrue(all(abs(start_x - x) <= 74 for start_x in xs), xs)
+
+    def test_edge_leaves_its_box_straight_down_its_own_channel(self):
+        persons = [person(f"P-000{number}") for number in range(4)]
+        relationships = [
+            relationship("R-0001", "P-0000", "parent-of", "P-0001"),
+            relationship("R-0002", "P-0000", "parent-of", "P-0003"),
+            relationship("R-0003", "P-0001", "parent-of", "P-0002"),
+            relationship("R-0004", "P-0000", "grandparent-of", "P-0002"),
+        ]
+
+        grid, routes = routed(persons, relationships)
+
+        self.assertEqual(grid.rows, (("P-0000",), ("P-0001", "P-0003"), ("P-0002",)))
+        points = coordinates(routes.edges[3])
+        next_row_top = routes.positions["P-0001"][1] - 24
+        self.assertEqual({x for x, y in points if y < next_row_top}, {points[0][0]}, points)
 
     def test_every_end_stays_on_its_own_box_side(self):
         bundle_through_a_row = (

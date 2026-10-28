@@ -90,21 +90,65 @@ class EdgeGeometryTest(unittest.TestCase):
         self.assertTrue(all(right - left >= 12 for left, right in zip(xs, xs[1:])), xs)
         self.assertTrue(all(abs(start_x - x) <= 74 for start_x in xs), xs)
 
-    def test_edge_leaves_its_box_straight_down_its_own_channel(self):
-        persons = [person(f"P-000{number}") for number in range(4)]
-        relationships = [
-            relationship("R-0001", "P-0000", "parent-of", "P-0001"),
-            relationship("R-0002", "P-0000", "parent-of", "P-0003"),
-            relationship("R-0003", "P-0001", "parent-of", "P-0002"),
-            relationship("R-0004", "P-0000", "grandparent-of", "P-0002"),
-        ]
+    def test_edge_runs_straight_between_its_box_and_its_own_channel(self):
+        # Each case routes edges from row 0 past row 1 to row 2; ``end`` indexes the checked end.
+        upper_end = (
+            [person(f"P-000{number}") for number in range(4)],
+            [
+                relationship("R-0001", "P-0000", "parent-of", "P-0001"),
+                relationship("R-0002", "P-0000", "parent-of", "P-0003"),
+                relationship("R-0003", "P-0001", "parent-of", "P-0002"),
+                relationship("R-0004", "P-0000", "grandparent-of", "P-0002"),
+            ],
+            (("P-0000",), ("P-0001", "P-0003"), ("P-0002",)),
+            ("R-0004",),
+            0,
+        )
+        lower_end = (
+            [person(person_id) for person_id in ("P-0000", "P-0003", "P-0004", "P-0005")],
+            [
+                relationship("R-0004", "P-0004", "parent-of", "P-0003"),
+                relationship("R-0005", "P-0004", "grandparent-of", "P-0005"),
+                relationship("R-0006", "P-0004", "parent-of", "P-0000"),
+                relationship("R-0009", "P-0004", "parent-of", "P-0005"),
+            ],
+            (("P-0004",), ("P-0000", "P-0003"), ("P-0005",)),
+            ("R-0005", "R-0009"),
+            -1,
+        )
+        # Channels leave the six ends below P-0000 no lane-grid layout near the side's middle.
+        crowded_side = (
+            [person(f"P-000{number}") for number in range(4)],
+            [
+                relationship("R-0000", "P-0000", "grandparent-of", "P-0001"),
+                relationship("R-0001", "P-0000", "parent-of", "P-0001"),
+                relationship("R-0003", "P-0000", "spouse-of", "P-0002"),
+                relationship("R-0005", "P-0000", "parent-of", "P-0003"),
+                relationship("R-0007", "P-0000", "parent-of", "P-0001"),
+                relationship("R-0009", "P-0000", "grandparent-of", "P-0001"),
+                relationship("R-0010", "P-0000", "parent-of", "P-0003"),
+            ],
+            (("P-0000", "P-0002"), ("P-0003",), ("P-0001",)),
+            ("R-0000", "R-0001", "R-0007", "R-0009"),
+            0,
+        )
+        for name, (persons, relationships, rows, checked, end) in (
+            ("upper end", upper_end),
+            ("lower end", lower_end),
+            ("upper end on a crowded side", crowded_side),
+        ):
+            with self.subTest(name):
+                grid, routes = routed(persons, relationships)
 
-        grid, routes = routed(persons, relationships)
-
-        self.assertEqual(grid.rows, (("P-0000",), ("P-0001", "P-0003"), ("P-0002",)))
-        points = coordinates(routes.edges[3])
-        next_row_top = routes.positions["P-0001"][1] - 24
-        self.assertEqual({x for x, y in points if y < next_row_top}, {points[0][0]}, points)
+                self.assertEqual(grid.rows, rows)
+                edges = dict(zip(sorted(row["relationship_id"] for row in relationships), routes.edges))
+                middle_y = routes.positions[rows[1][0]][1]
+                for relationship_id in checked:
+                    points = coordinates(edges[relationship_id])
+                    end_x, end_y = points[end]
+                    # Points between the end's box and row 1 (boxes are 48 px tall).
+                    beside_end = {x for x, y in points if abs(y - middle_y) > 24 and (y < middle_y) == (end_y < middle_y)}
+                    self.assertEqual(beside_end, {end_x}, (relationship_id, points))
 
     def test_every_end_stays_on_its_own_box_side(self):
         bundle_through_a_row = (

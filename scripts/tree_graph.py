@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Граф родства дела: интерактивный HTML, Mermaid и Graphviz DOT в <дело>/tree/.
+"""Граф родства дела: интерактивный HTML, PDF, Mermaid и Graphviz DOT в <дело>/tree/.
 
 По умолчанию показаны все сведения (рабочий вид, tree.private.*); с --exclude-living живые лица
 скрыты до person_id (вид для передачи, tree.*). Пока аудит реестров находит ошибки, граф не
-строится.
+строится. PDF печатает установленный Chrome, Chromium или Edge (build_pdf.print_pdf).
 """
 
 from __future__ import annotations
@@ -11,16 +11,23 @@ from __future__ import annotations
 import argparse
 import shlex
 import sys
+import tempfile
 from collections.abc import Mapping, Sequence
 from datetime import date
 from pathlib import Path
 
 from audit_evidence import audit_case, load_registers
-from build_pdf import find_chrome
+from build_pdf import find_chrome, print_pdf
 from research_common import atomic_bytes
 from tree_layout import layout
 from tree_model import Graph, build_graph
-from tree_render import render_dot, render_html, render_mermaid, render_svg
+from tree_render import (
+    render_dot,
+    render_html,
+    render_mermaid,
+    render_print_page,
+    render_svg,
+)
 
 EXIT_AUDIT_ERRORS = 1
 EXIT_NO_CASE = 2
@@ -43,11 +50,18 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     graph = _load_graph(case_dir, shareable=args.exclude_living)
     stem = "tree" if graph.shareable else "tree.private"
-    written = _write_outputs(case_dir / "tree", stem, _render(graph))
+    tree_dir = case_dir / "tree"
+    svg = render_svg(graph, layout(graph))
+    written = _write_outputs(tree_dir, stem, _render(graph, svg))
+    exit_code = 0
+    if not args.no_pdf:
+        pdf_path = tree_dir / f"{stem}.pdf"
+        if _build_pdf(args.chrome, render_print_page(graph, svg), pdf_path):
+            written.append(pdf_path)
+        else:
+            exit_code = EXIT_NO_PDF
     _report_build(written, graph, warnings=len(audit["warnings"]))
-    if args.no_pdf:
-        return 0
-    return _pdf_step(args.chrome)
+    return exit_code
 
 
 def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
@@ -84,9 +98,8 @@ def _load_graph(case_dir: Path, *, shareable: bool) -> Graph:
     )
 
 
-def _render(graph: Graph) -> dict[str, str]:
+def _render(graph: Graph, svg: str) -> dict[str, str]:
     """Тексты выходных файлов по расширению."""
-    svg = render_svg(graph, layout(graph))
     return {".html": render_html(graph, svg), ".mmd": render_mermaid(graph), ".dot": render_dot(graph)}
 
 
@@ -108,16 +121,24 @@ def _report_build(written: Sequence[Path], graph: Graph, *, warnings: int) -> No
     print(f"Предупреждений аудита: {warnings}")
 
 
-def _pdf_step(chrome: str | None) -> int:
+def _build_pdf(chrome: str | None, page: str, pdf_path: Path) -> bool:
+    """Печатает страницу в PDF; при неудаче пишет причину в stderr, прежний PDF остаётся."""
     browser = _pick_browser(chrome)
     if browser is None:
         print(
             "PDF не построен: браузер не найден. Укажите --chrome PATH или переменную CHROME_PATH.",
             file=sys.stderr,
         )
-    else:
-        print("PDF не построен: печать графа в PDF ещё не поддерживается.", file=sys.stderr)
-    return EXIT_NO_PDF
+        return False
+    # Страница печати — во временной папке рядом с PDF; папка удаляется и при ошибке.
+    with tempfile.TemporaryDirectory(prefix=".tree-print-", dir=pdf_path.parent) as staging:
+        page_path = Path(staging) / "print.html"
+        page_path.write_text(page, encoding="utf-8")
+        code = print_pdf(browser, page_path, pdf_path)
+    if code:
+        print(f"PDF не построен: браузер {browser} не смог напечатать граф (код {code}).", file=sys.stderr)
+        return False
+    return True
 
 
 def _pick_browser(explicit: str | None) -> str | None:

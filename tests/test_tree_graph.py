@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import base64
 import csv
 import html
 import json
@@ -17,11 +18,16 @@ import unittest
 from html.parser import HTMLParser
 from pathlib import Path
 
-from scripts.build_pdf import find_chrome
-
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS = ROOT / "scripts"
 ASSETS = ROOT / "assets"
+sys.path.insert(0, str(SCRIPTS))
+
+from build_pdf import find_chrome, inspect_html
+from tree_layout import layout
+from tree_model import build_graph
+from tree_render import render_print_page, render_svg
+
 CHROME = find_chrome(None)
 
 PRIVATE = ("tree.private.html", "tree.private.mmd", "tree.private.dot")
@@ -484,6 +490,25 @@ class InteractivePage(CaseTestBase):
         self.assertIn('Иван \\"', dot)
         self.assertEqual(len(dot_nodes(dot)), 6)
         self.assertEqual(set(dot_edges(dot)), set(EDGE_LABELS))
+
+
+class PrintPage(unittest.TestCase):
+    def test_print_page_passes_preflight_and_hides_living(self):
+        graph = build_graph(PERSONS, RELATIONSHIPS, shareable=True, current_year=2026)
+        page = render_print_page(graph, render_svg(graph, layout(graph)))
+        self.assertEqual(inspect_html(page, Path("tree.html")), ([], []))
+        images = [base64.b64decode(data).decode("utf-8")
+                  for data in re.findall(r'src="data:image/svg\+xml;base64,([A-Za-z0-9+/=]+)"', page)]
+        graph_svg = next(image for image in images if "P-0004" in image)
+        text = html.unescape(page) + "\n" + "\n".join(html.unescape(image) for image in images)
+        self.assertNotIn("Анна", text)
+        self.assertFalse(has_year(text, "1950"))
+        self.assertNotIn("со слов", text)
+        for rid in ("R-0004", "R-0007"):
+            self.assertIn(EDGE_LABELS[rid], html.unescape(graph_svg))
+        self.assertIn(BANNER_SHARED, text)
+        for status in set(EDGE_STATUS.values()):  # legend: all six statuses, outside the graph image
+            self.assertIn(status, html.unescape(page))
 
 
 class MissingBrowser(CaseTestBase):

@@ -1,4 +1,4 @@
-"""Отрисовка графа родства: SVG, интерактивная страница HTML, Mermaid и Graphviz DOT.
+"""Отрисовка графа родства: SVG, интерактивная страница HTML, страница печати PDF, Mermaid и DOT.
 
 Отрисовщики читают только Node и Edge из tree_model (сведения уже очищены по режиму) и
 раскладку из tree_layout. Любой текст из реестров — данные: он экранируется в каждом формате.
@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import base64
 import html
 import json
 from dataclasses import dataclass
@@ -176,16 +177,21 @@ def render_html(graph: Graph, svg: str) -> str:
 
 
 def _legend() -> str:
-    items = []
-    for status in STATUSES:
-        encoding = _ENCODINGS[status]
-        dash = f' stroke-dasharray="{encoding.dash}"' if encoding.dash else ""
-        sample = (
-            f'<svg width="48" height="12" aria-hidden="true"><line x1="2" y1="6" x2="46" y2="6" '
-            f'stroke="{encoding.colour}" stroke-width="{_num(encoding.width)}"{dash}/></svg>'
-        )
-        items.append(f"<li>{sample} <code>{status}</code> — {encoding.meaning}</li>")
+    items = (
+        f"<li>{_line_sample(_ENCODINGS[status])} <code>{status}</code> — {_ENCODINGS[status].meaning}</li>"
+        for status in STATUSES
+    )
     return "<ul>" + "".join(items) + f"</ul><p>{_ARROW_NOTE}</p>"
+
+
+def _line_sample(encoding: _Encoding) -> str:
+    """Образец линии статуса для легенды — самостоятельный SVG (годится и для <img>)."""
+    dash = f' stroke-dasharray="{encoding.dash}"' if encoding.dash else ""
+    return (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="48" height="12" aria-hidden="true">'
+        f'<line x1="2" y1="6" x2="46" y2="6" stroke="{encoding.colour}" '
+        f'stroke-width="{_num(encoding.width)}"{dash}/></svg>'
+    )
 
 
 def _tree_data(graph: Graph) -> str:
@@ -231,12 +237,17 @@ _PAGE = """<!DOCTYPE html>
 </html>
 """
 
-_STYLE = """
-body { margin: 0; padding: 16px; font-family: sans-serif; color: #222222; background: #ffffff; }
-h1 { margin: 0 0 8px; font-size: 22px; }
+_BANNER_STYLE = """
 .banner { margin: 0 0 12px; padding: 8px 12px; border-radius: 4px; font-weight: bold; }
 .banner.private { background: #fdecea; color: #8e0000; }
 .banner.shareable { background: #e8f5e9; color: #1b5e20; }
+"""
+
+_STYLE = (
+    _BANNER_STYLE
+    + """
+body { margin: 0; padding: 16px; font-family: sans-serif; color: #222222; background: #ffffff; }
+h1 { margin: 0 0 8px; font-size: 22px; }
 main { display: flex; gap: 12px; align-items: stretch; }
 #canvas { flex: 1 1 auto; min-width: 0; height: 72vh; border: 1px solid #cccccc; border-radius: 4px;
   overflow: hidden; touch-action: none; }
@@ -256,6 +267,7 @@ g.edge.selected text { font-weight: bold; fill: #1565c0; }
 .legend li { margin: 4px 0; }
 @media (max-width: 720px) { main { flex-direction: column; } #panel { flex-basis: auto; height: auto; } }
 """
+)
 
 # Щелчок по лицу или связи — панель из #tree-data; колесо — масштаб, перетаскивание — сдвиг
 # (меняется viewBox). Без сети и библиотек.
@@ -352,6 +364,76 @@ _SCRIPT = """
   });
 })();
 """
+
+
+# --- Страница печати (PDF) -----------------------------------------------------------------------
+
+
+def render_print_page(graph: Graph, svg: str) -> str:
+    """Статичная страница для build_pdf.print_pdf: заголовок, баннер, граф и легенда на первой
+    странице. Только теги из build_pdf.STATIC_TAGS; граф и образцы линий — SVG в <img> с адресом
+    data:, поэтому текст реестров не попадает в разметку и не похож на незаполненный <…>."""
+    mode = "shareable" if graph.shareable else "private"
+    if graph.nodes:
+        canvas = f'<img class="graph" src="{_svg_data_uri(svg)}" alt="{TITLE}">'
+    else:
+        canvas = f"<p>{EMPTY_NOTE}</p>"
+    return _PRINT_PAGE.format(
+        title=TITLE,
+        style=_PRINT_STYLE,
+        mode=mode,
+        banner=_attr(banner(graph)),
+        canvas=canvas,
+        legend=_print_legend(),
+    )
+
+
+def _print_legend() -> str:
+    rows = (
+        f'<tr><td><img src="{_svg_data_uri(_line_sample(_ENCODINGS[status]))}" alt=""></td>'
+        f"<td><code>{status}</code></td><td>{_ENCODINGS[status].meaning}</td></tr>"
+        for status in STATUSES
+    )
+    return "<table>" + "".join(rows) + f"</table><p>{_ARROW_NOTE}</p>"
+
+
+def _svg_data_uri(svg: str) -> str:
+    return "data:image/svg+xml;base64," + base64.b64encode(svg.encode("utf-8")).decode("ascii")
+
+
+_PRINT_PAGE = """<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>{title}</title>
+<style>{style}</style>
+</head>
+<body>
+<h1>{title}</h1>
+<p class="banner {mode}">{banner}</p>
+{canvas}
+<section class="legend"><h2>Легенда</h2>{legend}</section>
+</body>
+</html>
+"""
+
+# Граф ужат так, чтобы заголовок, баннер, граф и легенда уместились на первом листе A4.
+_PRINT_STYLE = (
+    _BANNER_STYLE
+    + """
+@page { size: A4; margin: 12mm; }
+body { margin: 0; font-family: sans-serif; color: #222222; background: #ffffff;
+  -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+h1 { margin: 0 0 6px; font-size: 20px; }
+h2 { margin: 12px 0 4px; font-size: 15px; }
+img.graph { display: block; max-width: 100%; max-height: 175mm; width: auto; height: auto;
+  border: 1px solid #cccccc; }
+.legend { break-inside: avoid; font-size: 12px; }
+.legend table { border-collapse: collapse; }
+.legend td { padding: 2px 8px 2px 0; vertical-align: middle; }
+.legend p { margin: 4px 0 0; }
+"""
+)
 
 
 # --- Mermaid -----------------------------------------------------------------------------------

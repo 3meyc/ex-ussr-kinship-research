@@ -318,6 +318,20 @@ class AuditCase(unittest.TestCase):
         self.assertEqual(summary["claims_by_status"], {"hypothesis": 1})
         self.assertEqual(summary["report_markers"], {"неразборчиво": 1, "предположительно": 1})
 
+    # Файл не в UTF-8 или с «;» вместо запятых даёт понятную ошибку, а не трассировку.
+
+    def test_cp1251_register_is_reported_not_crashed(self):
+        path = self.case / "person-register.csv"
+        path.write_bytes(path.read_text(encoding="utf-8").replace("P-0002", "P-0002 Іван").encode("cp1251"))
+        errors = self.audit()["errors"]
+        self.assertTrue(any("person-register.csv: файл не в UTF-8" in e for e in errors), errors)
+
+    def test_semicolon_delimited_register_is_named_as_such(self):
+        path = self.case / "claims-register.csv"
+        path.write_text(path.read_text(encoding="utf-8").replace(",", ";"), encoding="utf-8")
+        errors = self.audit()["errors"]
+        self.assertTrue(any("claims-register.csv: разделитель «;»" in e for e in errors), errors)
+
 
 if __name__ == "__main__":
     unittest.main()

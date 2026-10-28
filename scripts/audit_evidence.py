@@ -69,6 +69,8 @@ def read_csv(path: Path, required: set[str]) -> tuple[list[dict[str, str]], list
             reader = csv.DictReader(handle)
             if reader.fieldnames is None:
                 return [], [f"{path.name}: отсутствует строка заголовка"]
+            if len(reader.fieldnames) == 1 and ";" in reader.fieldnames[0]:
+                return [], [f"{path.name}: разделитель «;» вместо запятой; сохраните файл как CSV с запятыми"]
             missing = sorted(required - set(reader.fieldnames))
             if missing:
                 errors.append(f"{path.name}: отсутствуют колонки: {', '.join(missing)}")
@@ -87,6 +89,8 @@ def read_csv(path: Path, required: set[str]) -> tuple[list[dict[str, str]], list
                     )
                 rows.append({k: (v or "").strip() for k, v in row.items()})
             return rows, errors
+    except UnicodeDecodeError:
+        return [], [f"{path.name}: файл не в UTF-8 (вероятно, cp1251 из Excel); сохраните его как «CSV UTF-8»"]
     except OSError as exc:
         return [], [f"{path.name}: ошибка чтения: {exc}"]
 

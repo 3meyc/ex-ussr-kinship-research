@@ -36,7 +36,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--force",
         action="store_true",
-        help="Перезаписать только файлы шаблонов; не удаляет иные файлы",
+        help="Перезаписать только файлы шаблонов; изменённые файлы сохраняются как <имя>.<время>.bak, иные файлы не трогаются",
     )
     return parser.parse_args()
 
@@ -77,8 +77,16 @@ def main() -> int:
         )
         return 2
 
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    backups = []
     for source_name, dest_name in ASSET_FILES.items():
-        shutil.copyfile(assets_dir / source_name, case_dir / dest_name)
+        dest = case_dir / dest_name
+        # --force resets templates, but a file that no longer matches its template holds case data: keep a copy
+        if dest.exists() and dest.read_bytes() != (assets_dir / source_name).read_bytes():
+            backup = dest.with_name(f"{dest_name}.{stamp}.bak")
+            shutil.copy2(dest, backup)
+            backups.append(backup.name)
+        shutil.copyfile(assets_dir / source_name, dest)
 
     photos_dir = case_dir / "photos"
     photos_dir.mkdir(exist_ok=True)
@@ -108,6 +116,10 @@ def main() -> int:
     for dest_name in ASSET_FILES.values():
         print(f"- {dest_name}")
     print("- photos/README.md")
+    if backups:
+        print("Прежнее содержимое сохранено:")
+        for name in backups:
+            print(f"- {name}")
     return 0
 
 

@@ -22,7 +22,7 @@ from audit_evidence import Register, audit_registers, load_registers
 from build_pdf import find_chrome, print_pdf
 from research_common import atomic_bytes
 from tree_layout import layout
-from tree_model import Graph, build_graph
+from tree_model import Graph, IdConflict, IdConflictError, build_graph
 from tree_render import (
     render_dot,
     render_html,
@@ -51,7 +51,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         _report_audit_errors(audit["errors"], case_dir)
         return EXIT_AUDIT_ERRORS
 
-    graph = _build_graph(registers, shareable=args.exclude_living)
+    try:
+        graph = _build_graph(registers, shareable=args.exclude_living)
+    except IdConflictError as error:
+        _report_id_conflicts(error.conflicts)
+        return EXIT_AUDIT_ERRORS
     # Режимы пишут в разные папки: tree/share/ можно отправить целиком, не выбирая файлы.
     if graph.shareable:
         out_dir, stem = case_dir / "tree" / "share", "tree"
@@ -94,6 +98,23 @@ def _report_audit_errors(errors: Sequence[str], case_dir: Path) -> None:
         print(f"- {error}", file=sys.stderr)
     command = f"python3 scripts/audit_evidence.py --case-dir {shlex.quote(str(case_dir))}"
     print(f"Все ошибки: {command}", file=sys.stderr)
+
+
+def _report_id_conflicts(conflicts: Sequence[IdConflict]) -> None:
+    print(f"Граф не построен: id пусты или совпадают после очистки текста: {len(conflicts)}.", file=sys.stderr)
+    for conflict in conflicts[:_ERRORS_SHOWN]:
+        result = f"совпадает с {conflict.cleaned}" if conflict.cleaned else "пуст"
+        print(f"- {conflict.column} {_visible(conflict.raw)}: после очистки {result}", file=sys.stderr)
+    print(
+        "Такие id различаются только управляющими знаками, пробелами по краям или формой Юникода; "
+        "исправьте их в реестрах.",
+        file=sys.stderr,
+    )
+
+
+def _visible(text: str) -> str:
+    """Текст с непечатаемыми знаками в виде \\uXXXX, чтобы id было видно в терминале."""
+    return "".join(char if char.isprintable() else f"\\u{ord(char):04x}" for char in text)
 
 
 def _build_graph(registers: Mapping[str, Register], *, shareable: bool) -> Graph:
@@ -141,7 +162,8 @@ def _report_build(written: Sequence[Path], graph: Graph, *, warnings: int) -> No
 
 
 def _build_pdf(chrome: str | None, page: str, pdf_path: Path) -> bool:
-    """Печатает страницу в PDF; при неудаче пишет причину в stderr, прежний PDF остаётся."""
+    """Печатает страницу в PDF; при неудаче пишет причину в stderr, прежний PDF остаётся (в
+    передаваемом режиме main уже удалил его до записи файлов)."""
     browser = _pick_browser(chrome)
     if browser is None:
         print(

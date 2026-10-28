@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from collections import Counter
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 
@@ -92,6 +93,23 @@ class Edge:
 
 
 @dataclass(frozen=True)
+class IdConflict:
+    """id строки реестра, который после очистки текста пуст или совпал с id другой строки."""
+
+    column: str  # person_id или relationship_id
+    raw: str  # как записан в реестре
+    cleaned: str  # после очистки; пусто — id пуст
+
+
+class IdConflictError(ValueError):
+    """Граф не строится: после очистки текста id строк реестров пусты или совпадают."""
+
+    def __init__(self, conflicts: Iterable[IdConflict]) -> None:
+        self.conflicts = tuple(conflicts)
+        super().__init__(f"id пусты или совпадают после очистки текста: {len(self.conflicts)}")
+
+
+@dataclass(frozen=True)
 class Graph:
     nodes: tuple[Node, ...]  # по person_id
     edges: tuple[Edge, ...]  # по relationship_id
@@ -107,18 +125,25 @@ def build_graph(
     shareable: bool,
     current_year: int,
 ) -> Graph:
-    """Граф из строк person-register и relationship-register; строки с пустым id пропускаются.
+    """Граф из строк person-register и relationship-register; каждая строка очищается один раз, и
+    правило о живых, и граф читают очищенную строку. Строки с пустым id пропускаются.
     В передаваемом режиме (shareable) живые по правилу privacy.counts_as_living лица показаны
-    только person_id, у связей нет обоснования, а у связей таких лиц — и вида связи с уверенностью."""
-    person_rows, skipped_persons = _with_id(persons, "person_id")
-    relationship_rows, skipped_relationships = _with_id(relationships, "relationship_id")
+    только person_id, у связей нет обоснования, а у связей таких лиц — и вида связи с уверенностью.
+
+    IdConflictError — если непустой id после очистки пуст или совпал с id другой строки того же
+    реестра: такой граф слил бы или потерял строки молча."""
+    person_rows = _keyed_rows(persons, "person_id")
+    relationship_rows = _keyed_rows(relationships, "relationship_id")
+    conflicts = person_rows.conflicts + relationship_rows.conflicts
+    if conflicts:
+        raise IdConflictError(conflicts)
     nodes = sorted(
-        (_node(row, hidden=shareable and counts_as_living(row, current_year)) for row in person_rows),
+        (_node(row, hidden=shareable and counts_as_living(row, current_year)) for row in person_rows.rows),
         key=lambda node: node.person_id,
     )
     hidden_ids = frozenset(node.person_id for node in nodes if node.hidden)
     edges = sorted(
-        (_edge(row, shareable=shareable, hidden_ids=hidden_ids) for row in relationship_rows),
+        (_edge(row, shareable=shareable, hidden_ids=hidden_ids) for row in relationship_rows.rows),
         key=lambda edge: edge.relationship_id,
     )
     return Graph(
@@ -126,19 +151,43 @@ def build_graph(
         edges=tuple(edges),
         shareable=shareable,
         hidden_count=len(hidden_ids),
-        skipped_rows=skipped_persons + skipped_relationships,
+        skipped_rows=person_rows.skipped + relationship_rows.skipped,
     )
 
 
-def _with_id(rows: Iterable[Mapping[str, str]], id_name: str) -> tuple[list[Mapping[str, str]], int]:
-    """Строки с непустым id и число пропущенных."""
-    every_row = list(rows)
-    kept = [row for row in every_row if _value(row, id_name)]
-    return kept, len(every_row) - len(kept)
+@dataclass(frozen=True)
+class _KeyedRows:
+    rows: tuple[dict[str, str], ...]  # очищенные строки с непустым id
+    skipped: int  # строки с пустым id
+    conflicts: tuple[IdConflict, ...]  # id, которые очистка опустошила или слила с другим
+
+
+def _keyed_rows(rows: Iterable[Mapping[str, str]], id_name: str) -> _KeyedRows:
+    """Строки реестра, очищенные один раз, по их id."""
+    kept: list[tuple[str, dict[str, str]]] = []  # (id как в реестре, очищенная строка)
+    skipped = 0
+    emptied: list[IdConflict] = []
+    for row in rows:
+        raw_id = row.get(id_name) or ""
+        cleaned = _clean_row(row)
+        if cleaned.get(id_name):
+            kept.append((raw_id, cleaned))
+        elif raw_id.strip():
+            emptied.append(IdConflict(id_name, raw_id, ""))
+        else:
+            skipped += 1
+    uses = Counter(cleaned[id_name] for _, cleaned in kept)
+    merged = [IdConflict(id_name, raw_id, cleaned[id_name]) for raw_id, cleaned in kept if uses[cleaned[id_name]] > 1]
+    return _KeyedRows(tuple(cleaned for _, cleaned in kept), skipped, (*emptied, *merged))
+
+
+def _clean_row(row: Mapping[str, str]) -> dict[str, str]:
+    """Строка реестра с очищенными значениями; колонки без имени и пропущенные значения (None) не входят."""
+    return {name: _clean(value) for name, value in row.items() if isinstance(name, str) and isinstance(value, str)}
 
 
 def _node(row: Mapping[str, str], *, hidden: bool) -> Node:
-    person_id = _value(row, "person_id")
+    person_id = row.get("person_id", "")
     if hidden:
         return Node(person_id, person_id, "", True, (("person_id", person_id),))
     return Node(person_id, _label(row), _years(row), False, _pick(row, _PERSON_FIELDS))
@@ -146,20 +195,21 @@ def _node(row: Mapping[str, str], *, hidden: bool) -> Node:
 
 def _label(row: Mapping[str, str]) -> str:
     """preferred_label, иначе первое из names_as_written (через «;»), иначе person_id."""
-    first_written = _value(row, "names_as_written").split(";")[0].strip()
-    return _value(row, "preferred_label") or first_written or _value(row, "person_id")
+    first_written = row.get("names_as_written", "").split(";")[0].strip()
+    return row.get("preferred_label", "") or first_written or row.get("person_id", "")
 
 
 def _years(row: Mapping[str, str]) -> str:
-    parts = (_value(row, "birth_estimate"), _value(row, "death_estimate"))
-    return "–".join(part for part in parts if part)
+    """«рождение–смерть»; известна только смерть — «–смерть», только рождение — «рождение»."""
+    birth, death = row.get("birth_estimate", ""), row.get("death_estimate", "")
+    return f"{birth}–{death}" if death else birth
 
 
 def _edge(row: Mapping[str, str], *, shareable: bool, hidden_ids: frozenset[str]) -> Edge:
-    relationship_id = _value(row, "relationship_id")
-    relationship_type = _value(row, "relationship_type")
-    a, b = _value(row, "person_a_id"), _value(row, "person_b_id")
-    status = _value(row, "status")
+    relationship_id = row.get("relationship_id", "")
+    relationship_type = row.get("relationship_type", "")
+    a, b = row.get("person_a_id", ""), row.get("person_b_id", "")
+    status = row.get("status", "")
     directed, generation_step = _RELATIONSHIP_TYPES.get(relationship_type, _UNKNOWN_TYPE)
     if a in hidden_ids or b in hidden_ids:
         field_names = _HIDDEN_ENDPOINT_FIELDS
@@ -179,11 +229,9 @@ def _edge(row: Mapping[str, str], *, shareable: bool, hidden_ids: frozenset[str]
 
 
 def _pick(row: Mapping[str, str], names: tuple[str, ...]) -> tuple[tuple[str, str], ...]:
-    return tuple((name, _value(row, name)) for name in names)
+    return tuple((name, row.get(name, "")) for name in names)
 
 
-def _value(row: Mapping[str, str], name: str) -> str:
-    """Значение колонки, очищенное для вывода: непечатаемые знаки — пробелы, форма NFC, без пробелов
-    по краям; отсутствующая колонка читается пустой."""
-    printable = _UNPRINTABLE.sub(" ", row.get(name) or "")
-    return unicodedata.normalize("NFC", printable).strip()
+def _clean(text: str) -> str:
+    """Текст реестра для вывода: непечатаемые знаки — пробелы, форма NFC, без пробелов по краям."""
+    return unicodedata.normalize("NFC", _UNPRINTABLE.sub(" ", text)).strip()

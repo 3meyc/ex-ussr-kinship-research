@@ -9,7 +9,7 @@ from pathlib import Path
 SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
-from tree_model import build_graph
+from tree_model import IdConflict, IdConflictError, build_graph
 
 
 class RegisterText(unittest.TestCase):
@@ -22,6 +22,20 @@ class RegisterText(unittest.TestCase):
         node = graph.nodes[0]
         self.assertEqual(node.label, composed)
         self.assertEqual(dict(node.fields)["places"], composed)
+
+
+class IdsAfterCleaning(unittest.TestCase):
+    def test_relationship_ids_equal_after_cleaning_refuse_the_graph(self):
+        persons = [{"person_id": "P-0001", "living_status": "deceased"},
+                   {"person_id": "P-0002", "living_status": "deceased"}]
+        relationship = {"person_a_id": "P-0001", "relationship_type": "spouse-of", "person_b_id": "P-0002"}
+        relationships = [{**relationship, "relationship_id": "R-0001"},
+                         {**relationship, "relationship_id": "R-0001\x00"}]
+        with self.assertRaises(IdConflictError) as raised:
+            build_graph(persons, relationships, shareable=False, current_year=2026)
+        self.assertEqual(raised.exception.conflicts,
+                         (IdConflict("relationship_id", "R-0001", "R-0001"),
+                          IdConflict("relationship_id", "R-0001\x00", "R-0001")))
 
 
 if __name__ == "__main__":

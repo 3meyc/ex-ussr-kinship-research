@@ -14,7 +14,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from scripts.audit_evidence import artifact_groups, has_direct_record
+from scripts.audit_evidence import artifact_groups, audit_case, has_direct_record
 
 SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
 CLI_SCRIPTS = ("audit_evidence.py", "build_pdf.py", "familysearch.py", "gwar.py",
@@ -419,6 +419,15 @@ class AuditCase(unittest.TestCase):
         path.write_text(path.read_text(encoding="utf-8").replace(",", ";"), encoding="utf-8")
         errors = self.audit()["errors"]
         self.assertTrue(any("claims-register.csv: разделитель «;»" in e for e in errors), errors)
+
+    def test_audit_case_returns_what_the_cli_prints(self):
+        self.two_artifacts()
+        self.update_row("artifact-register.csv", "A-0001", person_ids="P-9999")
+        self.append("relationship-register.csv",
+                    RELATION.format(id="R-0001", claims="", artifacts="", groups="", status="invented"))
+        cli = self.audit()
+        self.assertTrue(cli["errors"] and cli["warnings"], cli)
+        self.assertEqual(audit_case(self.case.resolve()), cli)
 
 
 if __name__ == "__main__":

@@ -294,15 +294,10 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def main() -> int:
-    args = parse_args()
-    case_dir = Path(args.case_dir).expanduser().resolve()
+def audit_case(case_dir: Path) -> dict:
+    """Audit a resolved case directory; the result is what `--json` prints."""
     errors: list[str] = []
     warnings: list[str] = []
-
-    if not case_dir.is_dir():
-        print(f"Ошибка: директория дела не найдена: {case_dir}", file=sys.stderr)
-        return 2
 
     registers, load_errors = load_registers(case_dir)
     errors.extend(load_errors)
@@ -478,7 +473,7 @@ def main() -> int:
         "report_markers": markers,
     }
 
-    result = {
+    return {
         "case_dir": str(case_dir),
         "counts": {
             "persons": len(persons),
@@ -492,14 +487,28 @@ def main() -> int:
         "warnings": warnings,
     }
 
+
+def main() -> int:
+    args = parse_args()
+    case_dir = Path(args.case_dir).expanduser().resolve()
+
+    if not case_dir.is_dir():
+        print(f"Ошибка: директория дела не найдена: {case_dir}", file=sys.stderr)
+        return 2
+
+    result = audit_case(case_dir)
+    counts, summary = result["counts"], result["summary"]
+    markers = summary["report_markers"]
+    errors, warnings = result["errors"], result["warnings"]
+
     if args.json:
         print(json.dumps(result, ensure_ascii=False, indent=2))
     else:
         print(f"Проверено дело: {case_dir}")
         print(
             "Записей: "
-            f"лица={len(persons)}, артефакты={len(artifacts)}, "
-            f"утверждения={len(claims)}, связи={len(relationships)}, поиски={len(search_rows)}"
+            f"лица={counts['persons']}, артефакты={counts['artifacts']}, "
+            f"утверждения={counts['claims']}, связи={counts['relationships']}, поиски={counts['searches']}"
         )
         open_statuses = ("hypothesis", "single-source", "unresolved", "contradicted", "пусто")
         print("\nСВОДКА:")

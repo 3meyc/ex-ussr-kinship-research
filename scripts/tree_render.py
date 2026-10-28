@@ -7,17 +7,23 @@
 from __future__ import annotations
 
 import base64
+import bisect
 import html
 import json
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Tuple
+from typing import TYPE_CHECKING
 
-from tree_model import STATUSES
+from tree_model import DIRECTED_TYPES, STATUSES
 
 if TYPE_CHECKING:
     from tree_layout import Layout
     from tree_model import Edge, Graph, Node
+
+    _Point = tuple[float, float]
+    _Box = tuple[float, float, float, float]  # left, top, right, bottom
+    _Route = tuple[str, list[_Point]]  # атрибут d пути и точки вдоль него
 
 BANNER_PRIVATE = "Содержит сведения о живых лицах — не для передачи"
 BANNER_SHAREABLE = "Живые лица скрыты: показан только person_id"
@@ -50,20 +56,28 @@ _ENCODINGS = {
     "unresolved": _Encoding("#888888", 1.5, "", "solid", "grey", "-->", "---", "не решена или статус не указан"),
     "contradicted": _Encoding("#c62828", 1.5, "", "solid", "red", "-->", "---", "противоречит источникам"),
 }
-_ARROW_NOTE = "Стрелка идёт от person_a к person_b у parent-of, grandparent-of и godparent-of."
+_ARROW_NOTE = (
+    "Стрелка идёт от person_a к person_b у "
+    + " и ".join(filter(None, (", ".join(DIRECTED_TYPES[:-1]), DIRECTED_TYPES[-1])))
+    + "."
+)
 
 # Размер узла меньше шага сетки tree_layout. Центры узлов лежат на целочисленной сетке, поэтому
 # все координаты ниже — целые числа (или с одной десятичной у толщины линий).
 _NODE_WIDTH = 160
 _NODE_HEIGHT = 48
+_NODE_PADDING = 6  # поле слева и справа от текста в узле
 _ARC_RISE = 48  # подъём контрольной точки дуги между лицами одной строки
+_LANE = 12  # шаг между связями одной пары лиц и между каналами связей в строке
+_CLEARANCE = 12  # наименьший зазор между каналом связи и чужим узлом
+_CURVE_SAMPLES = 16  # точек на участок кривой при поиске места подписи
+_CHAR_EM = 0.6  # ширина знака с запасом, в долях кегля (sans-serif)
 _LABEL_SIZE = 10
-_LABEL_CHAR_WIDTH = 6  # ширина знака подписи с запасом (0,6 em sans-serif)
 _LABEL_GAP = 2  # зазор вокруг подписи
-# Доли пути, на которых пробуется подпись: от середины к концам, не доходя до узлов и стрелки.
+# Доли длины пути, на которых пробуется подпись: от середины к концам, не доходя до узлов и стрелки.
 _LABEL_STEPS = (0.5, 0.4, 0.6, 0.3, 0.7, 0.2, 0.8)
-
-_Box = Tuple[float, float, float, float]  # left, top, right, bottom
+# Управляющие знаки C0 недопустимы в XML: в тексте SVG они заменены пробелом.
+_CONTROL_TO_SPACE = {code: " " for code in range(0x20)}
 
 
 def banner(graph: Graph) -> str:
@@ -108,11 +122,12 @@ def _svg_markers() -> str:
 def _svg_edges(graph: Graph, layout: Layout) -> list[str]:
     """Связи по порядку; подпись каждой — в первой точке пути, свободной от узлов и прежних подписей."""
     node_boxes = [_node_box(layout.positions[node.person_id]) for node in graph.nodes]
+    router = _Router(layout)
     label_boxes: list[_Box] = []
     parts = []
-    for edge in graph.edges:
-        path, anchors = _edge_geometry(layout.positions[edge.a], layout.positions[edge.b])
-        anchor = _label_anchor(edge.label, anchors, node_boxes, label_boxes)
+    for edge, offset in zip(graph.edges, _pair_offsets(graph.edges)):
+        path, points = router.route(edge, offset)
+        anchor = _label_anchor(edge.label, _label_anchors(points), node_boxes, label_boxes)
         label_boxes.append(_label_box(edge.label, anchor))
         parts.append(_svg_edge(edge, path, anchor))
     return parts
@@ -140,7 +155,7 @@ def _label_anchor(
 def _label_box(label: str, anchor: tuple[int, int]) -> _Box:
     """Рамка подписи по центру anchor (x, базовая линия) с зазором."""
     x, baseline = anchor
-    half = len(label) * _LABEL_CHAR_WIDTH / 2 + _LABEL_GAP
+    half = len(label) * _LABEL_SIZE * _CHAR_EM / 2 + _LABEL_GAP
     return (x - half, baseline - _LABEL_SIZE - _LABEL_GAP, x + half, baseline + _LABEL_SIZE * 0.3 + _LABEL_GAP)
 
 
@@ -174,37 +189,131 @@ def _stroke_attrs(encoding: _Encoding) -> str:
     return style
 
 
-def _edge_geometry(
-    start: tuple[float, float], end: tuple[float, float]
-) -> tuple[str, list[tuple[int, int]]]:
-    """Путь между границами узлов и места подписи на нём в порядке предпочтения (целые x и базовая
-    линия). В одной строке — дуга над узлами, иначе — отрезок от нижней (верхней) кромки одного
-    узла к верхней (нижней) кромке другого."""
-    (x1, y1), (x2, y2) = start, end
-    half = _NODE_HEIGHT / 2
-    if y1 == y2:
-        top, mid_x = y1 - half, (x1 + x2) / 2
-        control = top - _ARC_RISE
-        path = f"M{_num(x1)} {_num(top)} Q{_num(mid_x)} {_num(control)} {_num(x2)} {_num(top)}"
-        points = [_quadratic((x1, top), (mid_x, control), (x2, top), t) for t in _LABEL_STEPS]
-    else:
-        sign = 1 if y2 > y1 else -1
-        y1, y2 = y1 + sign * half, y2 - sign * half
-        path = f"M{_num(x1)} {_num(y1)} L{_num(x2)} {_num(y2)}"
-        points = [(x1 + (x2 - x1) * t, y1 + (y2 - y1) * t) for t in _LABEL_STEPS]
-    # Базовая линия ниже точки пути на 0,4 кегля: строка встаёт на линию серединой.
-    return path, [(round(x), round(y + _LABEL_SIZE * 0.4)) for x, y in points]
+def _pair_offsets(edges: Sequence[Edge]) -> list[int]:
+    """Сдвиг концов каждой связи по x: связи одной пары лиц расходятся на _LANE по порядку
+    relationship_id, симметрично середине узла; у единственной связи пары — 0."""
+    pairs: dict[frozenset[str], list[int]] = {}
+    for index, edge in enumerate(edges):
+        pairs.setdefault(frozenset((edge.a, edge.b)), []).append(index)
+    offsets = [0] * len(edges)
+    for indexes in pairs.values():
+        for lane, index in enumerate(indexes):
+            offsets[index] = round((lane - (len(indexes) - 1) / 2) * _LANE)
+    return offsets
 
 
-def _quadratic(
-    start: tuple[float, float], control: tuple[float, float], end: tuple[float, float], t: float
-) -> tuple[float, float]:
-    """Точка квадратичной кривой Безье при параметре t."""
-    weights = ((1 - t) ** 2, 2 * t * (1 - t), t**2)
-    return (
-        sum(weight * point[0] for weight, point in zip(weights, (start, control, end))),
-        sum(weight * point[1] for weight, point in zip(weights, (start, control, end))),
-    )
+class _Router:
+    """Пути связей в порядке вызова. Связь через несколько строк проходит каждую промежуточную
+    строку по вертикальному каналу, свободному от узлов (с зазором _CLEARANCE) и от каналов прежних
+    связей (с шагом _LANE), а между строками — кривой. Поэтому длинная связь не ложится ни под узел,
+    ни на другую связь; связи соседних строк и одной строки проходят только промежутки между строками."""
+
+    def __init__(self, layout: Layout) -> None:
+        self._positions = layout.positions
+        self._low, self._high = _CLEARANCE, layout.width - _CLEARANCE
+        self._nodes: dict[float, list[tuple[float, float]]] = {}  # y строки → запретные отрезки x
+        for x, y in layout.positions.values():
+            reach = _NODE_WIDTH / 2 + _CLEARANCE
+            self._nodes.setdefault(y, []).append((x - reach, x + reach))
+        self._channels: dict[float, list[tuple[float, float]]] = {}  # y строки → занятые каналы
+
+    def route(self, edge: Edge, offset: int) -> _Route:
+        (x1, y1), (x2, y2) = self._positions[edge.a], self._positions[edge.b]
+        x1, x2 = x1 + offset, x2 + offset
+        if y1 == y2:
+            return _arc((x1, y1 - _NODE_HEIGHT / 2), (x2, y2 - _NODE_HEIGHT / 2))
+        half = _NODE_HEIGHT / 2 if y2 > y1 else -_NODE_HEIGHT / 2
+        start, end = (x1, y1 + half), (x2, y2 - half)
+        crossed = sorted((y for y in self._nodes if min(y1, y2) < y < max(y1, y2)), reverse=y2 < y1)
+        if not crossed:
+            return _line(start, end)
+        points = [start]
+        for row_y in crossed:
+            x = self._take_channel(row_y, x1 + (x2 - x1) * (row_y - y1) / (y2 - y1))
+            points += [(x, row_y - half), (x, row_y + half)]
+        return _channel_path([*points, end])
+
+    def _take_channel(self, row_y: float, target: float) -> float:
+        """Ближайший к target x строки вне узлов, затем вне занятых каналов (при равенстве — меньший);
+        выбранный канал занимается."""
+        nodes, channels = self._nodes[row_y], self._channels.setdefault(row_y, [])
+        target = min(max(round(target), self._low), self._high)
+        bounds = (end for block in (*nodes, *channels) for end in block)
+        candidates = [x for x in (target, self._low, self._high, *bounds) if self._low <= x <= self._high]
+
+        def cost(x: float) -> tuple[bool, bool, float, float]:
+            return (_inside(x, nodes), _inside(x, channels), abs(x - target), x)
+
+        channel = min(candidates, key=cost)
+        channels.append((channel - _LANE, channel + _LANE))
+        return channel
+
+
+def _inside(x: float, blocks: Sequence[tuple[float, float]]) -> bool:
+    return any(left < x < right for left, right in blocks)
+
+
+def _line(start: _Point, end: _Point) -> _Route:
+    return f"M{_num(start[0])} {_num(start[1])} L{_num(end[0])} {_num(end[1])}", [start, end]
+
+
+def _arc(start: _Point, end: _Point) -> _Route:
+    """Дуга над узлами между верхними кромками двух лиц одной строки."""
+    control = ((start[0] + end[0]) / 2, start[1] - _ARC_RISE)
+    path = f"M{_num(start[0])} {_num(start[1])} Q{_num(control[0])} {_num(control[1])} {_num(end[0])} {_num(end[1])}"
+    return path, [start, *_curve_points((start, control, end))]
+
+
+def _channel_path(points: Sequence[_Point]) -> _Route:
+    """Путь от узла через каналы к узлу: участки одного x — отрезки, переходы — кубические кривые в
+    промежутке между строками. В канал кривая входит и выходит вертикально, а от узла уходит сразу к
+    повороту, чтобы не идти вдоль другой связи из той же точки узла."""
+    kept = [
+        point
+        for index, point in enumerate(points)
+        if index in (0, len(points) - 1) or not points[index - 1][0] == point[0] == points[index + 1][0]
+    ]
+    path, samples = [f"M{_num(kept[0][0])} {_num(kept[0][1])}"], [kept[0]]
+    last = len(kept) - 1
+    for index, ((x1, y1), (x2, y2)) in enumerate(zip(kept, kept[1:])):
+        if x1 == x2:
+            path.append(f"L{_num(x2)} {_num(y2)}")
+            samples.append((x2, y2))
+            continue
+        middle = (y1 + y2) / 2
+        first = (x1, y1) if index == 0 else (x1, middle)
+        second = (x2, y2) if index + 1 == last else (x2, middle)
+        path.append(f"C{_num(first[0])} {_num(first[1])} {_num(second[0])} {_num(second[1])} {_num(x2)} {_num(y2)}")
+        samples += _curve_points(((x1, y1), first, second, (x2, y2)))
+    return " ".join(path), samples
+
+
+def _curve_points(controls: Sequence[_Point]) -> list[_Point]:
+    """Точки кривой Безье (по алгоритму де Кастельжо) после начальной, конечная включена."""
+    points = []
+    for step in range(1, _CURVE_SAMPLES + 1):
+        t, level = step / _CURVE_SAMPLES, list(controls)
+        while len(level) > 1:
+            level = [((1 - t) * a[0] + t * b[0], (1 - t) * a[1] + t * b[1]) for a, b in zip(level, level[1:])]
+        points.append(level[0])
+    return points
+
+
+def _label_anchors(points: Sequence[_Point]) -> list[tuple[int, int]]:
+    """Места подписи в порядке предпочтения: точки на долях _LABEL_STEPS длины пути (целые x и
+    базовая линия; базовая линия ниже точки на 0,4 кегля, так строка встаёт на путь серединой)."""
+    lengths = [0.0]
+    for (x1, y1), (x2, y2) in zip(points, points[1:]):
+        lengths.append(lengths[-1] + math.hypot(x2 - x1, y2 - y1))
+    anchors = []
+    for fraction in _LABEL_STEPS:
+        distance = fraction * lengths[-1]
+        index = max(1, min(bisect.bisect_left(lengths, distance), len(points) - 1))
+        span = lengths[index] - lengths[index - 1]
+        t = (distance - lengths[index - 1]) / span if span else 0.0
+        (x1, y1), (x2, y2) = points[index - 1], points[index]
+        anchors.append((round(x1 + (x2 - x1) * t), round(y1 + (y2 - y1) * t + _LABEL_SIZE * 0.4)))
+    return anchors
 
 
 def _node_box(centre: tuple[float, float]) -> _Box:
@@ -219,14 +328,22 @@ def _svg_node(node: Node, layout: Layout) -> str:
     lines = [(node.label, 13, y - 4), (node.years, 11, y + 14)] if node.years else [(node.label, 13, y + 5)]
     texts = "".join(
         f'<text x="{_num(x)}" y="{_num(line_y)}" text-anchor="middle" font-size="{size}" fill="{_INK}">'
-        f"{_attr(text)}</text>"
+        f"{_attr(_fit(text, size))}</text>"
         for text, size, line_y in lines
     )
+    # <title> — полный текст узла (подсказка при наведении), даже если строка в узле обрезана.
+    full = " ".join(text for text in (node.label, node.years) if text)
     return (
-        f'<g class="node" data-id="{_attr(node.person_id)}" tabindex="0">'
+        f'<g class="node" data-id="{_attr(node.person_id)}" tabindex="0"><title>{_attr(full)}</title>'
         f'<rect x="{_num(left)}" y="{_num(top)}" width="{_NODE_WIDTH}" height="{_NODE_HEIGHT}" rx="6" '
         f'fill="{fill}" stroke="{_INK}" stroke-width="1"{dash}/>{texts}</g>'
     )
+
+
+def _fit(text: str, size: int) -> str:
+    """Строка узла, оценённая по _CHAR_EM; не помещается между полями — обрезана и кончается «…»."""
+    room = int((_NODE_WIDTH - 2 * _NODE_PADDING) / (size * _CHAR_EM))
+    return text if len(text) <= room else text[: room - 1] + "…"
 
 
 def _num(value: float) -> str:
@@ -234,7 +351,12 @@ def _num(value: float) -> str:
 
 
 def _attr(text: str) -> str:
-    return html.escape(text, quote=True)
+    """Текст или значение атрибута разметки: знаки C0 заменены пробелом, спецсимволы экранированы."""
+    return html.escape(_printable(text), quote=True)
+
+
+def _printable(text: str) -> str:
+    return text.translate(_CONTROL_TO_SPACE)
 
 
 # --- HTML --------------------------------------------------------------------------------------
@@ -277,8 +399,11 @@ def _line_sample(encoding: _Encoding) -> str:
 def _tree_data(graph: Graph) -> str:
     """JSON для панели; <, > и & записаны JSON-escape, чтобы текст не закрыл <script>."""
     data = {
-        "nodes": {node.person_id: _node_data(node) for node in graph.nodes},
-        "edges": {edge.relationship_id: {"title": edge.label, "fields": edge.fields} for edge in graph.edges},
+        # Ключи — как data-id в SVG (без знаков C0), чтобы щелчок нашёл свою запись.
+        "nodes": {_printable(node.person_id): _node_data(node) for node in graph.nodes},
+        "edges": {
+            _printable(edge.relationship_id): {"title": edge.label, "fields": edge.fields} for edge in graph.edges
+        },
     }
     text = json.dumps(data, ensure_ascii=False)
     return text.replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
@@ -409,6 +534,7 @@ _SCRIPT = """
   });
   svg.addEventListener("pointermove", function (event) {
     if (!drag) { return; }
+    if (event.buttons === 0) { drag = null; return; }  // кнопку отпустили вне окна
     var dx = event.clientX - drag.x;
     var dy = event.clientY - drag.y;
     if (!dragged && Math.abs(dx) + Math.abs(dy) < 4) { return; }
@@ -429,9 +555,12 @@ _SCRIPT = """
     if (event.key === "Enter" || event.key === " ") { event.preventDefault(); pick(event.target); }
   });
   svg.addEventListener("wheel", function (event) {
+    if (event.deltaY === 0) { return; }  // горизонтальная прокрутка — не масштаб
     event.preventDefault();
     var point = toSvg(event.clientX, event.clientY);
-    var factor = event.deltaY < 0 ? 0.9 : 1 / 0.9;
+    // Шаг 0,9 на 100 пикселей прокрутки (строка — 20 пикселей), не больше трёх шагов за событие.
+    var steps = Math.min(Math.abs(event.deltaY) * (event.deltaMode ? 20 : 1) / 100, 3);
+    var factor = Math.pow(0.9, event.deltaY < 0 ? steps : -steps);
     view[0] = point.x - (point.x - view[0]) * factor;
     view[1] = point.y - (point.y - view[1]) * factor;
     view[2] *= factor;
@@ -516,7 +645,15 @@ img.graph { display: block; max-width: 100%; max-height: 175mm; width: auto; hei
 # --- Mermaid -----------------------------------------------------------------------------------
 
 # Сущности Mermaid (#name;) вместо символов, которые закрыли бы метку или начали сущность.
-_MERMAID_ENTITIES = {"#": "#35;", '"': "#quot;", "<": "#lt;", ">": "#gt;", "|": "#124;"}
+_MERMAID_ENTITIES = {
+    "#": "#35;",
+    '"': "#quot;",
+    "<": "#lt;",
+    ">": "#gt;",
+    "|": "#124;",
+    "&": "#38;",  # иначе «&lt;» из реестра Mermaid покажет как «<»
+    "%": "#37;",  # иначе «%%» начнёт комментарий или директиву Mermaid
+}
 
 
 def render_mermaid(graph: Graph) -> str:

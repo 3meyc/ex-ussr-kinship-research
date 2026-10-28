@@ -17,14 +17,6 @@ COLUMN_WIDTH = 200.0
 ROW_HEIGHT = 120.0
 MARGIN = 40.0
 _COMPONENT_GAP = COLUMN_WIDTH / 2
-# Сдвиг поколения от person_a к person_b. godparent-of, other и неизвестные типы поколение не задают.
-_GENERATION_STEP = {
-    "parent-of": 1,
-    "grandparent-of": 2,
-    "spouse-of": 0,
-    "sibling-of": 0,
-    "half-sibling-of": 0,
-}
 
 
 @dataclass(frozen=True)
@@ -50,7 +42,7 @@ def _generation_steps(graph: Graph) -> dict[str, list[tuple[str, int]]]:
     """Для каждого лица со связью-рангом: (сосед, сдвиг поколения к нему) в порядке relationship_id."""
     steps: dict[str, list[tuple[str, int]]] = {}
     for edge in graph.edges:
-        step = _GENERATION_STEP.get(edge.type)
+        step = edge.generation_step
         if step is None:
             continue
         steps.setdefault(edge.a, []).append((edge.b, step))

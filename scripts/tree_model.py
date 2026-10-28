@@ -21,8 +21,18 @@ STATUSES = (
     "contradicted",
 )
 _UNRESOLVED = "unresolved"
-# Связь читается «person_a <тип> person_b»; у этих типов стрелка a→b, у остальных её нет.
-_DIRECTED_TYPES = frozenset({"parent-of", "grandparent-of", "godparent-of"})
+# Связь читается «person_a <тип> person_b»: тип → (стрелка a→b, сдвиг поколения от a к b; None —
+# поколение не задаёт). Типа нет в таблице (other, неизвестный) — без стрелки и без поколения.
+_RELATIONSHIP_TYPES = {
+    "parent-of": (True, 1),
+    "grandparent-of": (True, 2),
+    "godparent-of": (True, None),
+    "spouse-of": (False, 0),
+    "sibling-of": (False, 0),
+    "half-sibling-of": (False, 0),
+}
+_UNKNOWN_TYPE = (False, None)
+DIRECTED_TYPES = tuple(name for name, (directed, _) in _RELATIONSHIP_TYPES.items() if directed)
 # Только эти колонки реестров попадают в вывод; notes, relatives_as_reported и прочие — никогда.
 _PERSON_FIELDS = (
     "person_id",
@@ -48,6 +58,10 @@ _RELATIONSHIP_FIELDS = (
 )
 # Обоснование — свободный текст, в нём бывают имена живых; в передаваемый граф не попадает.
 _SHAREABLE_RELATIONSHIP_FIELDS = tuple(name for name in _RELATIONSHIP_FIELDS if name != "rationale")
+# Вид связи (усыновление, опека) и уверенность говорят о семье живого лица; у его связей их нет.
+_HIDDEN_ENDPOINT_FIELDS = tuple(
+    name for name in _SHAREABLE_RELATIONSHIP_FIELDS if name not in ("confidence", "biological_legal_household")
+)
 
 
 @dataclass(frozen=True)
@@ -67,6 +81,7 @@ class Edge:
     type: str
     status: str  # один из STATUSES
     directed: bool  # стрелка от a к b
+    generation_step: int | None  # сдвиг поколения от a к b; None — связь поколение не задаёт
     label: str
     fields: tuple[tuple[str, str], ...]
 
@@ -77,6 +92,7 @@ class Graph:
     edges: tuple[Edge, ...]  # по relationship_id
     shareable: bool
     hidden_count: int
+    skipped_rows: int  # строки реестров с пустым person_id или relationship_id, в граф не вошли
 
 
 def build_graph(
@@ -86,18 +102,34 @@ def build_graph(
     shareable: bool,
     current_year: int,
 ) -> Graph:
-    """Граф из строк person-register и relationship-register. В передаваемом режиме (shareable)
-    живые по правилу privacy.counts_as_living лица показаны только person_id, а у связей нет
-    обоснования."""
+    """Граф из строк person-register и relationship-register; строки с пустым id пропускаются.
+    В передаваемом режиме (shareable) живые по правилу privacy.counts_as_living лица показаны
+    только person_id, у связей нет обоснования, а у связей таких лиц — и вида связи с уверенностью."""
+    person_rows, skipped_persons = _with_id(persons, "person_id")
+    relationship_rows, skipped_relationships = _with_id(relationships, "relationship_id")
     nodes = sorted(
-        (_node(row, hidden=shareable and counts_as_living(row, current_year)) for row in persons),
+        (_node(row, hidden=shareable and counts_as_living(row, current_year)) for row in person_rows),
         key=lambda node: node.person_id,
     )
+    hidden_ids = frozenset(node.person_id for node in nodes if node.hidden)
     edges = sorted(
-        (_edge(row, shareable=shareable) for row in relationships),
+        (_edge(row, shareable=shareable, hidden_ids=hidden_ids) for row in relationship_rows),
         key=lambda edge: edge.relationship_id,
     )
-    return Graph(tuple(nodes), tuple(edges), shareable, sum(node.hidden for node in nodes))
+    return Graph(
+        nodes=tuple(nodes),
+        edges=tuple(edges),
+        shareable=shareable,
+        hidden_count=len(hidden_ids),
+        skipped_rows=skipped_persons + skipped_relationships,
+    )
+
+
+def _with_id(rows: Iterable[Mapping[str, str]], id_name: str) -> tuple[list[Mapping[str, str]], int]:
+    """Строки с непустым id и число пропущенных."""
+    every_row = list(rows)
+    kept = [row for row in every_row if _value(row, id_name)]
+    return kept, len(every_row) - len(kept)
 
 
 def _node(row: Mapping[str, str], *, hidden: bool) -> Node:
@@ -118,19 +150,26 @@ def _years(row: Mapping[str, str]) -> str:
     return "–".join(part for part in parts if part)
 
 
-def _edge(row: Mapping[str, str], *, shareable: bool) -> Edge:
+def _edge(row: Mapping[str, str], *, shareable: bool, hidden_ids: frozenset[str]) -> Edge:
     relationship_id = _value(row, "relationship_id")
     relationship_type = _value(row, "relationship_type")
+    a, b = _value(row, "person_a_id"), _value(row, "person_b_id")
     status = _value(row, "status")
+    directed, generation_step = _RELATIONSHIP_TYPES.get(relationship_type, _UNKNOWN_TYPE)
+    if a in hidden_ids or b in hidden_ids:
+        field_names = _HIDDEN_ENDPOINT_FIELDS
+    else:
+        field_names = _SHAREABLE_RELATIONSHIP_FIELDS if shareable else _RELATIONSHIP_FIELDS
     return Edge(
         relationship_id=relationship_id,
-        a=_value(row, "person_a_id"),
-        b=_value(row, "person_b_id"),
+        a=a,
+        b=b,
         type=relationship_type,
         status=status if status in STATUSES else _UNRESOLVED,
-        directed=relationship_type in _DIRECTED_TYPES,
+        directed=directed,
+        generation_step=generation_step,
         label=f"{relationship_type} · {relationship_id}",
-        fields=_pick(row, _SHAREABLE_RELATIONSHIP_FIELDS if shareable else _RELATIONSHIP_FIELDS),
+        fields=_pick(row, field_names),
     )
 
 

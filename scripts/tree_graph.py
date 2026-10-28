@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Граф родства дела: интерактивный HTML, PDF, Mermaid и Graphviz DOT в <дело>/tree/.
+"""Граф родства дела: интерактивный HTML, PDF, Mermaid и Graphviz DOT.
 
-По умолчанию показаны все сведения (рабочий вид, tree.private.*); с --exclude-living живые лица
-скрыты до person_id (вид для передачи, tree.*). Пока аудит реестров находит ошибки, граф не
-строится. PDF печатает установленный Chrome, Chromium или Edge (build_pdf.print_pdf).
+По умолчанию показаны все сведения (рабочий вид, <дело>/tree/private/tree.private.*); с
+--exclude-living живые лица скрыты до person_id (вид для передачи, <дело>/tree/share/tree.*).
+Пока аудит реестров находит ошибки, граф не строится. PDF печатает установленный Chrome,
+Chromium или Edge (build_pdf.print_pdf).
 """
 
 from __future__ import annotations
@@ -51,19 +52,23 @@ def main(argv: Sequence[str] | None = None) -> int:
         return EXIT_AUDIT_ERRORS
 
     graph = _build_graph(registers, shareable=args.exclude_living)
-    stem = "tree" if graph.shareable else "tree.private"
-    tree_dir = case_dir / "tree"
+    # Режимы пишут в разные папки: tree/share/ можно отправить целиком, не выбирая файлы.
+    if graph.shareable:
+        out_dir, stem = case_dir / "tree" / "share", "tree"
+    else:
+        out_dir, stem = case_dir / "tree" / "private", "tree.private"
     svg = render_svg(graph, layout(graph))
-    written = _write_outputs(tree_dir, stem, _render(graph, svg))
-    exit_code = 0
-    if not args.no_pdf:
-        pdf_path = tree_dir / f"{stem}.pdf"
-        if _build_pdf(args.chrome, render_print_page(graph, svg), pdf_path):
-            written.append(pdf_path)
-        else:
-            exit_code = EXIT_NO_PDF
+    written = _write_outputs(out_dir, stem, _render(graph, svg))
+    pdf_path = out_dir / f"{stem}.pdf"
+    pdf_built = not args.no_pdf and _build_pdf(args.chrome, render_print_page(graph, svg), pdf_path)
+    if pdf_built:
+        written.append(pdf_path)
+    elif graph.shareable and pdf_path.exists():
+        # Прежний передаваемый PDF не совпадает с новым графом; его не должны отправить по ошибке.
+        pdf_path.unlink()
+        print(f"Удалён устаревший PDF: {pdf_path}", file=sys.stdout if args.no_pdf else sys.stderr)
     _report_build(written, graph, warnings=len(audit["warnings"]))
-    return exit_code
+    return 0 if pdf_built or args.no_pdf else EXIT_NO_PDF
 
 
 def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
@@ -72,12 +77,12 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser.add_argument(
         "--exclude-living",
         action="store_true",
-        help="Вид для передачи: живые лица показаны только person_id (файлы tree.*)",
+        help="Вид для передачи: живые лица показаны только person_id (папка tree/share/)",
     )
     parser.add_argument("--no-pdf", action="store_true", help="Не строить PDF")
     parser.add_argument(
         "--chrome",
-        help="Браузер для PDF; несуществующий путь — браузера нет. Без него: CHROME_PATH, затем поиск",
+        help="Файл браузера для PDF; иной путь — браузера нет. Без него: CHROME_PATH, затем поиск",
     )
     return parser.parse_args(argv)
 
@@ -105,11 +110,11 @@ def _render(graph: Graph, svg: str) -> dict[str, str]:
     return {".html": render_html(graph, svg), ".mmd": render_mermaid(graph), ".dot": render_dot(graph)}
 
 
-def _write_outputs(tree_dir: Path, stem: str, texts: Mapping[str, str]) -> list[Path]:
-    """Каждый файл заменяется атомарно (временный файл в tree/ и os.replace)."""
+def _write_outputs(out_dir: Path, stem: str, texts: Mapping[str, str]) -> list[Path]:
+    """Каждый файл заменяется атомарно (временный файл в той же папке и os.replace)."""
     written = []
     for suffix, text in texts.items():
-        path = tree_dir / f"{stem}{suffix}"
+        path = out_dir / f"{stem}{suffix}"
         atomic_bytes(path, text.encode("utf-8"))
         written.append(path)
     return written
@@ -120,6 +125,8 @@ def _report_build(written: Sequence[Path], graph: Graph, *, warnings: int) -> No
     for path in written:
         print(f"  {path}")
     print(f"лица: {len(graph.nodes)}, связи: {len(graph.edges)}, скрыто живых: {graph.hidden_count}")
+    if graph.skipped_rows:
+        print(f"Не показано строк реестров с пустым person_id или relationship_id: {graph.skipped_rows}")
     print(f"Предупреждений аудита: {warnings}")
 
 
@@ -147,9 +154,9 @@ def _build_pdf(chrome: str | None, page: str, pdf_path: Path) -> bool:
 
 
 def _pick_browser(explicit: str | None) -> str | None:
-    """Явно указанный --chrome, если путь существует; без него — CHROME_PATH и автопоиск."""
+    """Явно указанный --chrome, если это существующий файл; без него — CHROME_PATH и автопоиск."""
     if explicit is not None:
-        return explicit if Path(explicit).exists() else None
+        return explicit if Path(explicit).is_file() else None
     return find_chrome(None)
 
 

@@ -9,8 +9,9 @@ from __future__ import annotations
 import base64
 import html
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Tuple
 
 from tree_model import STATUSES
 
@@ -56,6 +57,13 @@ _ARROW_NOTE = "Стрелка идёт от person_a к person_b у parent-of, g
 _NODE_WIDTH = 160
 _NODE_HEIGHT = 48
 _ARC_RISE = 48  # подъём контрольной точки дуги между лицами одной строки
+_LABEL_SIZE = 10
+_LABEL_CHAR_WIDTH = 6  # ширина знака подписи с запасом (0,6 em sans-serif)
+_LABEL_GAP = 2  # зазор вокруг подписи
+# Доли пути, на которых пробуется подпись: от середины к концам, не доходя до узлов и стрелки.
+_LABEL_STEPS = (0.5, 0.4, 0.6, 0.3, 0.7, 0.2, 0.8)
+
+_Box = Tuple[float, float, float, float]  # left, top, right, bottom
 
 
 def banner(graph: Graph) -> str:
@@ -77,7 +85,7 @@ def render_svg(graph: Graph, layout: Layout) -> str:
         _svg_markers(),
         f'<rect width="{width}" height="{height}" fill="#ffffff"/>',
         '<g class="edges">',
-        *(_svg_edge(edge, layout) for edge in graph.edges),
+        *_svg_edges(graph, layout),
         "</g>",
         '<g class="nodes">',
         *(_svg_node(node, layout) for node in graph.nodes),
@@ -97,8 +105,48 @@ def _svg_markers() -> str:
     return "<defs>" + "".join(markers) + "</defs>"
 
 
-def _svg_edge(edge: Edge, layout: Layout) -> str:
-    path, (label_x, label_y) = _edge_geometry(layout.positions[edge.a], layout.positions[edge.b])
+def _svg_edges(graph: Graph, layout: Layout) -> list[str]:
+    """Связи по порядку; подпись каждой — в первой точке пути, свободной от узлов и прежних подписей."""
+    node_boxes = [_node_box(layout.positions[node.person_id]) for node in graph.nodes]
+    label_boxes: list[_Box] = []
+    parts = []
+    for edge in graph.edges:
+        path, anchors = _edge_geometry(layout.positions[edge.a], layout.positions[edge.b])
+        anchor = _label_anchor(edge.label, anchors, node_boxes, label_boxes)
+        label_boxes.append(_label_box(edge.label, anchor))
+        parts.append(_svg_edge(edge, path, anchor))
+    return parts
+
+
+def _label_anchor(
+    label: str, anchors: Sequence[tuple[int, int]], node_boxes: Sequence[_Box], label_boxes: Sequence[_Box]
+) -> tuple[int, int]:
+    """Первая точка, где подпись не задевает узлы, а среди них — прежние подписи; если такой нет —
+    с наименьшим числом задетых узлов, затем подписей."""
+
+    def hits(anchor: tuple[int, int]) -> tuple[int, int]:
+        box = _label_box(label, anchor)
+        return (
+            sum(_overlap(box, node) for node in node_boxes),
+            sum(_overlap(box, other) for other in label_boxes),
+        )
+
+    return min(anchors, key=hits)
+
+
+def _label_box(label: str, anchor: tuple[int, int]) -> _Box:
+    """Рамка подписи по центру anchor (x, базовая линия) с зазором."""
+    x, baseline = anchor
+    half = len(label) * _LABEL_CHAR_WIDTH / 2 + _LABEL_GAP
+    return (x - half, baseline - _LABEL_SIZE - _LABEL_GAP, x + half, baseline + _LABEL_SIZE * 0.3 + _LABEL_GAP)
+
+
+def _overlap(first: _Box, second: _Box) -> bool:
+    return first[0] < second[2] and second[0] < first[2] and first[1] < second[3] and second[1] < first[3]
+
+
+def _svg_edge(edge: Edge, path: str, anchor: tuple[int, int]) -> str:
+    label_x, label_y = anchor
     encoding = _ENCODINGS[edge.status]
     style = f' stroke="{encoding.colour}" stroke-width="{_num(encoding.width)}"'
     if encoding.dash:
@@ -110,31 +158,52 @@ def _svg_edge(edge: Edge, layout: Layout) -> str:
         f'<g class="edge" data-id="{_attr(edge.relationship_id)}" data-status="{edge.status}" tabindex="0">'
         f'<path d="{path}" fill="none"{style}/>'
         f'<path d="{path}" fill="none" stroke="transparent" stroke-width="14"/>'
-        f'<text x="{_num(label_x)}" y="{_num(label_y)}" text-anchor="middle" font-size="10" fill="{_INK}" '
+        f'<text x="{label_x}" y="{label_y}" text-anchor="middle" font-size="{_LABEL_SIZE}" fill="{_INK}" '
         f'stroke="#ffffff" stroke-width="3" paint-order="stroke">{_attr(edge.label)}</text></g>'
     )
 
 
-def _edge_geometry(start: tuple[float, float], end: tuple[float, float]) -> tuple[str, tuple[float, float]]:
-    """Путь между границами узлов и точка подписи. В одной строке — дуга над узлами, иначе —
-    отрезок от нижней (верхней) кромки одного узла к верхней (нижней) кромке другого."""
+def _edge_geometry(
+    start: tuple[float, float], end: tuple[float, float]
+) -> tuple[str, list[tuple[int, int]]]:
+    """Путь между границами узлов и места подписи на нём в порядке предпочтения (целые x и базовая
+    линия). В одной строке — дуга над узлами, иначе — отрезок от нижней (верхней) кромки одного
+    узла к верхней (нижней) кромке другого."""
     (x1, y1), (x2, y2) = start, end
     half = _NODE_HEIGHT / 2
     if y1 == y2:
         top, mid_x = y1 - half, (x1 + x2) / 2
         control = top - _ARC_RISE
         path = f"M{_num(x1)} {_num(top)} Q{_num(mid_x)} {_num(control)} {_num(x2)} {_num(top)}"
-        # Подпись под вершиной дуги, ниже подписей отрезков из строки выше (они на середине промежутка).
-        return path, (mid_x, top - 12)
-    sign = 1 if y2 > y1 else -1
-    y1, y2 = y1 + sign * half, y2 - sign * half
-    path = f"M{_num(x1)} {_num(y1)} L{_num(x2)} {_num(y2)}"
-    return path, ((x1 + x2) / 2, (y1 + y2) / 2 + 4)
+        points = [_quadratic((x1, top), (mid_x, control), (x2, top), t) for t in _LABEL_STEPS]
+    else:
+        sign = 1 if y2 > y1 else -1
+        y1, y2 = y1 + sign * half, y2 - sign * half
+        path = f"M{_num(x1)} {_num(y1)} L{_num(x2)} {_num(y2)}"
+        points = [(x1 + (x2 - x1) * t, y1 + (y2 - y1) * t) for t in _LABEL_STEPS]
+    # Базовая линия ниже точки пути на 0,4 кегля: строка встаёт на линию серединой.
+    return path, [(round(x), round(y + _LABEL_SIZE * 0.4)) for x, y in points]
+
+
+def _quadratic(
+    start: tuple[float, float], control: tuple[float, float], end: tuple[float, float], t: float
+) -> tuple[float, float]:
+    """Точка квадратичной кривой Безье при параметре t."""
+    weights = ((1 - t) ** 2, 2 * t * (1 - t), t**2)
+    return (
+        sum(weight * point[0] for weight, point in zip(weights, (start, control, end))),
+        sum(weight * point[1] for weight, point in zip(weights, (start, control, end))),
+    )
+
+
+def _node_box(centre: tuple[float, float]) -> _Box:
+    x, y = centre
+    return (x - _NODE_WIDTH / 2, y - _NODE_HEIGHT / 2, x + _NODE_WIDTH / 2, y + _NODE_HEIGHT / 2)
 
 
 def _svg_node(node: Node, layout: Layout) -> str:
     x, y = layout.positions[node.person_id]
-    left, top = x - _NODE_WIDTH / 2, y - _NODE_HEIGHT / 2
+    left, top, _, _ = _node_box((x, y))
     fill, dash = ("#eeeeee", ' stroke-dasharray="4 3"') if node.hidden else ("#ffffff", "")
     lines = [(node.label, 13, y - 4), (node.years, 11, y + 14)] if node.years else [(node.label, 13, y + 5)]
     texts = "".join(

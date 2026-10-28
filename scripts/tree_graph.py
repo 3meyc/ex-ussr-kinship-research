@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import shlex
 import sys
 import tempfile
@@ -130,11 +131,15 @@ def _build_pdf(chrome: str | None, page: str, pdf_path: Path) -> bool:
             file=sys.stderr,
         )
         return False
-    # Страница печати — во временной папке рядом с PDF; папка удаляется и при ошибке.
+    # Страница и PDF печатаются во временную папку рядом с PDF (папка 700, удаляется и при ошибке);
+    # готовый PDF получает права 600, как прочие файлы, и только потом заменяет прежний.
     with tempfile.TemporaryDirectory(prefix=".tree-print-", dir=pdf_path.parent) as staging:
-        page_path = Path(staging) / "print.html"
+        page_path, printed = Path(staging) / "print.html", Path(staging) / pdf_path.name
         page_path.write_text(page, encoding="utf-8")
-        code = print_pdf(browser, page_path, pdf_path)
+        code = print_pdf(browser, page_path, printed)
+        if not code:
+            printed.chmod(0o600)
+            os.replace(printed, pdf_path)
     if code:
         print(f"PDF не построен: браузер {browser} не смог напечатать граф (код {code}).", file=sys.stderr)
         return False

@@ -11,6 +11,7 @@ import html
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 import tempfile
@@ -108,16 +109,21 @@ MERMAID_NODE = re.compile(r'\b(n\d+)\s*[\[({]+\s*"([^"]*)"')
 
 
 class SvgEdges(HTMLParser):
-    """Collects edge groups (attributes of the group merged with its first path) and the panel data."""
+    """Collects edge groups (attributes of the group merged with its first path), node boxes, edge
+    label texts and the panel data."""
 
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self.edges: dict = {}
         self.node_ids: list = []
+        self.node_boxes: list = []  # (left, top, right, bottom) of each node <rect>
+        self.labels: list = []  # [attributes, text] of each edge <text>
         self.tree_data = None
         self._groups: list = []
+        self._node_groups: list = []
         self._with_path: set = set()
         self._in_tree_data = False
+        self._label = None
 
     def handle_starttag(self, tag, attrs):
         values = {name: value or "" for name, value in attrs}
@@ -132,6 +138,13 @@ class SvgEdges(HTMLParser):
             if edge_id:
                 self.edges[edge_id] = values
             self._groups.append(edge_id)
+            self._node_groups.append("node" in classes)
+        elif tag == "rect" and self._node_groups and self._node_groups[-1]:
+            left, top = float(values["x"]), float(values["y"])
+            self.node_boxes.append((left, top, left + float(values["width"]), top + float(values["height"])))
+        elif tag == "text" and self._groups and self._groups[-1]:
+            self._label = [values, ""]
+            self.labels.append(self._label)
         elif tag == "path":
             edge_id = next((group for group in reversed(self._groups) if group), None)
             if edge_id and edge_id not in self._with_path:
@@ -141,12 +154,17 @@ class SvgEdges(HTMLParser):
     def handle_endtag(self, tag):
         if tag == "g" and self._groups:
             self._groups.pop()
+            self._node_groups.pop()
         elif tag == "script":
             self._in_tree_data = False
+        elif tag == "text":
+            self._label = None
 
     def handle_data(self, data):
         if self._in_tree_data:
             self.tree_data += data
+        elif self._label is not None:
+            self._label[1] += data
 
 
 def parse_page(source: str) -> SvgEdges:
@@ -160,6 +178,18 @@ def page_text(source: str) -> str:
     """Page markup with entities decoded plus the panel data with JSON escapes decoded."""
     data = json.loads(parse_page(source).tree_data)
     return html.unescape(source) + "\n" + json.dumps(data, ensure_ascii=False)
+
+
+def label_box(attrs: dict, text: str) -> tuple:
+    """Generous box of a centred label: 0.6 em per character, from one em above the baseline to
+    0.3 em below it."""
+    x, y, size = float(attrs["x"]), float(attrs["y"]), float(attrs["font-size"])
+    half = len(text) * 0.6 * size / 2
+    return (x - half, y - size, x + half, y + 0.3 * size)
+
+
+def boxes_overlap(first: tuple, second: tuple) -> bool:
+    return first[0] < second[2] and second[0] < first[2] and first[1] < second[3] and second[1] < first[3]
 
 
 def has_year(text: str, year: str) -> bool:
@@ -424,6 +454,13 @@ class EdgeEncoding(CaseTestBase):
         self.assertAlmostEqual(width("R-0001"), 3 * width("R-0002"))
         self.assertNotEqual(edges["R-0003"]["stroke-dasharray"], edges["R-0004"]["stroke-dasharray"])
 
+        page = parse_page(self.read("tree.private.html"))
+        self.assertEqual(sorted(text for _, text in page.labels), sorted(EDGE_LABELS.values()))
+        self.assertEqual(len(page.node_boxes), 6)
+        covered = [(text, node) for attrs, text in page.labels for node in page.node_boxes
+                   if boxes_overlap(label_box(attrs, text), node)]
+        self.assertEqual(covered, [], "edge labels under node boxes")
+
     def test_mermaid_and_dot_have_every_node_and_edge(self):
         mmd, dot = self.read("tree.private.mmd"), self.read("tree.private.dot")
         mermaid_labels = dict(MERMAID_NODE.findall(mmd))
@@ -540,6 +577,7 @@ class PdfBuild(CaseTestBase):
         proc = self.build_with_pdf()
         self.assertEqual(set(self.snapshot()), set(PRIVATE) | {PRIVATE_PDF})
         self.assertTrue((self.tree / PRIVATE_PDF).read_bytes().startswith(b"%PDF-"))
+        self.assertEqual(stat.S_IMODE((self.tree / PRIVATE_PDF).stat().st_mode), 0o600)
         self.assert_counts(proc.stdout, 6, 7, 0)
 
     def test_shareable_build_keeps_private_files(self):

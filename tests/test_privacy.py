@@ -26,6 +26,10 @@ class CountsAsLivingTest(unittest.TestCase):
             ("unknown", "ок. 1905–1912", "", False),
             ("unknown", "1890-е или 1920", "", True),
             ("", "неизвестно", "", True),
+            ("Жив", "1950", "", True),
+            ("unknown", "1975", "неизвестно", True),
+            (" Deceased ", "", "", False),
+            ("living", "1950", "ок. 2001", False),
             ("living", "1950", "   ", True),
             ("  ", "", "", True),
         ]

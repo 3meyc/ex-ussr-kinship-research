@@ -101,20 +101,18 @@ def _report_audit_errors(errors: Sequence[str], case_dir: Path) -> None:
 
 
 def _report_id_conflicts(conflicts: Sequence[IdConflict]) -> None:
+    """Каждая группа id, слитых или опустошённых очисткой, — одной строкой; id в записи Python (repr),
+    чтобы управляющие знаки было видно в терминале."""
     print(f"Граф не построен: id пусты или совпадают после очистки текста: {len(conflicts)}.", file=sys.stderr)
     for conflict in conflicts[:_ERRORS_SHOWN]:
-        result = f"совпадает с {conflict.cleaned}" if conflict.cleaned else "пуст"
-        print(f"- {conflict.column} {_visible(conflict.raw)}: после очистки {result}", file=sys.stderr)
+        raw_ids = ", ".join(f"{raw_id!r}" for raw_id in conflict.raw_ids)
+        result = f"{conflict.cleaned!r}" if conflict.cleaned else "пусто"
+        print(f"- {conflict.column} {raw_ids}: после очистки {result}", file=sys.stderr)
     print(
         "Такие id различаются только управляющими знаками, пробелами по краям или формой Юникода; "
         "исправьте их в реестрах.",
         file=sys.stderr,
     )
-
-
-def _visible(text: str) -> str:
-    """Текст с непечатаемыми знаками в виде \\uXXXX, чтобы id было видно в терминале."""
-    return "".join(char if char.isprintable() else f"\\u{ord(char):04x}" for char in text)
 
 
 def _build_graph(registers: Mapping[str, Register], *, shareable: bool) -> Graph:

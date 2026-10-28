@@ -85,6 +85,36 @@ class EdgeGeometryTest(unittest.TestCase):
         self.assertTrue(all(right - left >= 12 for left, right in zip(xs, xs[1:])), xs)
         self.assertTrue(all(x - 80 < start_x < x + 80 for start_x in xs), xs)
 
+    def test_every_end_stays_on_its_own_box_side(self):
+        bundle_through_a_row = (
+            [person(f"P-000{number}") for number in range(1, 5)],
+            [
+                relationship("R-0001", "P-0001", "grandparent-of", "P-0003"),
+                relationship("R-0002", "P-0001", "grandparent-of", "P-0003"),
+                relationship("R-0003", "P-0001", "half-sibling-of", "P-0003"),
+                relationship("R-0004", "P-0001", "other", "P-0003"),
+                relationship("R-0005", "P-0001", "parent-of", "P-0002"),
+                relationship("R-0006", "P-0001", "spouse-of", "P-0004"),
+            ],
+        )
+        ninety_children = (
+            [person(f"P-{number:04d}") for number in range(91)],
+            [relationship(f"R-{child:04d}", "P-0000", "parent-of", f"P-{child:04d}") for child in range(1, 91)],
+        )
+        for name, (persons, relationships) in (
+            ("bundle crossing a row", bundle_through_a_row),
+            ("90 ends on one side", ninety_children),
+        ):
+            with self.subTest(name):
+                _, routes = routed(persons, relationships)
+
+                for edge, data in zip(routes.edges, sorted(relationships, key=lambda row: row["relationship_id"])):
+                    ends = coordinates(edge)[0], coordinates(edge)[-1]
+                    for (end_x, end_y), person_id in zip(ends, (data["person_a_id"], data["person_b_id"])):
+                        x, y = routes.positions[person_id]
+                        self.assertIn(end_y, (y - 24, y + 24), (data["relationship_id"], person_id))
+                        self.assertLess(abs(end_x - x), 80, (data["relationship_id"], person_id, end_x, x))
+
 
 if __name__ == "__main__":
     unittest.main()

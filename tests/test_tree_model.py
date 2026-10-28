@@ -34,8 +34,21 @@ class IdsAfterCleaning(unittest.TestCase):
         with self.assertRaises(IdConflictError) as raised:
             build_graph(persons, relationships, shareable=False, current_year=2026)
         self.assertEqual(raised.exception.conflicts,
-                         (IdConflict("relationship_id", "R-0001", "R-0001"),
-                          IdConflict("relationship_id", "R-0001\x00", "R-0001")))
+                         (IdConflict("relationship_id", "R-0001", ("R-0001", "R-0001\x00")),))
+
+
+class LivingStatusAfterCleaning(unittest.TestCase):
+    def test_status_changed_by_cleaning_keeps_the_person_living(self):
+        person = {"person_id": "P-0001", "preferred_label": "Анна", "living_status": "\x01deceased",
+                  "birth_estimate": "1990"}
+        graph = build_graph([person], [], shareable=True, current_year=2026)
+        self.assertEqual((graph.nodes[0].hidden, graph.nodes[0].label, graph.hidden_count), (True, "P-0001", 1))
+
+    def test_status_padded_with_spaces_still_counts(self):
+        person = {"person_id": "P-0001", "preferred_label": "Анна", "living_status": " deceased ",
+                  "birth_estimate": "1990"}
+        graph = build_graph([person], [], shareable=True, current_year=2026)
+        self.assertEqual((graph.nodes[0].hidden, graph.hidden_count), (False, 0))
 
 
 if __name__ == "__main__":

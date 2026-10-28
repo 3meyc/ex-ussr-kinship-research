@@ -9,6 +9,7 @@ import base64
 import csv
 import html
 import json
+import math
 import os
 import re
 import stat
@@ -16,6 +17,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import xml.etree.ElementTree as ET
 from html.parser import HTMLParser
 from pathlib import Path
 
@@ -31,10 +33,11 @@ from tree_render import render_print_page, render_svg
 
 CHROME = find_chrome(None)
 
-PRIVATE = ("tree.private.html", "tree.private.mmd", "tree.private.dot")
-SHARED = ("tree.html", "tree.mmd", "tree.dot")
-PRIVATE_PDF = "tree.private.pdf"
-SHARED_PDF = "tree.pdf"
+# Paths relative to <case>/tree/: each mode writes to its own folder.
+PRIVATE = ("private/tree.private.html", "private/tree.private.mmd", "private/tree.private.dot")
+SHARED = ("share/tree.html", "share/tree.mmd", "share/tree.dot")
+PRIVATE_PDF = "private/tree.private.pdf"
+SHARED_PDF = "share/tree.pdf"
 BANNER_PRIVATE = "Содержит сведения о живых лицах — не для передачи"
 BANNER_SHARED = "Живые лица скрыты: показан только person_id"
 
@@ -117,6 +120,7 @@ class SvgEdges(HTMLParser):
         self.edges: dict = {}
         self.node_ids: list = []
         self.node_boxes: list = []  # (left, top, right, bottom) of each node <rect>
+        self.box_of: dict = {}  # person_id -> the box of that node's first <rect>
         self.labels: list = []  # [attributes, text] of each edge <text>
         self.tree_data = None
         self._groups: list = []
@@ -124,6 +128,7 @@ class SvgEdges(HTMLParser):
         self._with_path: set = set()
         self._in_tree_data = False
         self._label = None
+        self._node_id = None
 
     def handle_starttag(self, tag, attrs):
         values = {name: value or "" for name, value in attrs}
@@ -134,6 +139,7 @@ class SvgEdges(HTMLParser):
         elif tag == "g":
             if "node" in classes:
                 self.node_ids.append(values.get("data-id"))
+                self._node_id = values.get("data-id")
             edge_id = values.get("data-id") if "edge" in classes else None
             if edge_id:
                 self.edges[edge_id] = values
@@ -142,6 +148,7 @@ class SvgEdges(HTMLParser):
         elif tag == "rect" and self._node_groups and self._node_groups[-1]:
             left, top = float(values["x"]), float(values["y"])
             self.node_boxes.append((left, top, left + float(values["width"]), top + float(values["height"])))
+            self.box_of.setdefault(self._node_id, self.node_boxes[-1])
         elif tag == "text" and self._groups and self._groups[-1]:
             self._label = [values, ""]
             self.labels.append(self._label)
@@ -236,6 +243,117 @@ def mermaid_edges(mmd: str) -> dict:
     return edges
 
 
+def mermaid_text(label: str) -> str:
+    """Text Mermaid shows for a quoted label: entity codes (`#quot;`, `#35;`) become HTML entities,
+    then the label is rendered as HTML."""
+    label = re.sub(r"#(\d+);", r"&#\1;", label)
+    return html.unescape(re.sub(r"#([A-Za-z]\w*);", r"&\1;", label))
+
+
+def panel_entries(data, item_id: str) -> list:
+    """Smallest parts of the panel data that belong to `item_id`: the value under a key equal to the
+    id, else the innermost objects holding the id as a value."""
+    found: list = []
+
+    def visit(value) -> bool:
+        if isinstance(value, str):
+            return value == item_id
+        if isinstance(value, dict) and item_id in value:
+            found.append(value[item_id])
+            return True
+        if not isinstance(value, (dict, list)):
+            return False
+        before = len(found)
+        contains = False
+        for child in value.values() if isinstance(value, dict) else value:
+            contains = visit(child) or contains  # visit every child, not only up to the first hit
+        if isinstance(value, dict) and contains and len(found) == before:
+            found.append(value)
+        return contains
+
+    visit(data)
+    return found
+
+
+PATH_TOKEN = re.compile(r"[A-Za-z]|[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?")
+PATH_ARITY = {"M": 2, "L": 2, "H": 1, "V": 1, "Q": 4, "C": 6, "A": 7, "Z": 0}
+
+
+def bezier(points: tuple, t: float) -> tuple:
+    while len(points) > 1:
+        points = tuple(((1 - t) * a[0] + t * b[0], (1 - t) * a[1] + t * b[1]) for a, b in zip(points, points[1:]))
+    return points[0]
+
+
+def arc(start: tuple, args: list, end: tuple, steps: int) -> list:
+    """Points of an SVG elliptical arc (endpoint to centre conversion, SVG 1.1 F.6.5)."""
+    rx, ry, phi, large, sweep = abs(args[0]), abs(args[1]), math.radians(args[2]), args[3] != 0, args[4] != 0
+    if rx == 0 or ry == 0:
+        return [bezier((start, end), k / steps) for k in range(1, steps + 1)]
+    cos, sin = math.cos(phi), math.sin(phi)
+    dx, dy = (start[0] - end[0]) / 2, (start[1] - end[1]) / 2
+    x1, y1 = cos * dx + sin * dy, -sin * dx + cos * dy
+    scale = max(1.0, math.sqrt(x1 ** 2 / rx ** 2 + y1 ** 2 / ry ** 2))
+    rx, ry = rx * scale, ry * scale
+    numerator = rx ** 2 * ry ** 2 - rx ** 2 * y1 ** 2 - ry ** 2 * x1 ** 2
+    coef = math.sqrt(max(0.0, numerator / (rx ** 2 * y1 ** 2 + ry ** 2 * x1 ** 2)))
+    coef = -coef if large == sweep else coef
+    cx1, cy1 = coef * rx * y1 / ry, -coef * ry * x1 / rx
+    cx = cos * cx1 - sin * cy1 + (start[0] + end[0]) / 2
+    cy = sin * cx1 + cos * cy1 + (start[1] + end[1]) / 2
+    first = math.atan2((y1 - cy1) / ry, (x1 - cx1) / rx)
+    sweep_angle = math.atan2((-y1 - cy1) / ry, (-x1 - cx1) / rx) - first
+    if sweep and sweep_angle < 0:
+        sweep_angle += 2 * math.pi
+    elif not sweep and sweep_angle > 0:
+        sweep_angle -= 2 * math.pi
+    points = []
+    for k in range(1, steps + 1):
+        angle = first + sweep_angle * k / steps
+        points.append((cx + rx * math.cos(angle) * cos - ry * math.sin(angle) * sin,
+                       cy + rx * math.cos(angle) * sin + ry * math.sin(angle) * cos))
+    return points
+
+
+def path_points(d: str, steps: int = 64) -> list:
+    """Points along an SVG path `d` (M, L, H, V, Q, C, A, Z, absolute and relative)."""
+    tokens = PATH_TOKEN.findall(d)
+    points: list = []
+    current = start = (0.0, 0.0)
+    command, index = "M", 0
+    while index < len(tokens):
+        if tokens[index].isalpha():
+            command, index = tokens[index], index + 1
+        kind, relative = command.upper(), command.islower()
+        if kind not in PATH_ARITY:
+            raise ValueError(f"unsupported path command {command!r} in {d!r}")
+        args = [float(value) for value in tokens[index:index + PATH_ARITY[kind]]]
+        index += PATH_ARITY[kind]
+        base = current if relative else (0.0, 0.0)
+        pairs = [(args[i] + base[0], args[i + 1] + base[1]) for i in range(0, len(args) - 1, 2)]
+        if kind == "Z":
+            end, controls = start, ()
+        elif kind == "H":
+            end, controls = (args[0] + base[0], current[1]), ()
+        elif kind == "V":
+            end, controls = (current[0], args[0] + base[1]), ()
+        elif kind == "A":
+            end = (args[5] + base[0], args[6] + base[1])
+            points.extend(arc(current, args, end, steps))
+            current = end
+            continue
+        else:
+            end, controls = pairs[-1], tuple(pairs[:-1])
+        if kind == "M":
+            points.append(end)
+            current = start = end
+            command = "l" if relative else "L"  # further pairs after a moveto are linetos
+            continue
+        points.extend(bezier((current, *controls, end), k / steps) for k in range(1, steps + 1))
+        current = end
+    return points
+
+
 def ids_by_person(labels: dict) -> dict:
     """Map person_id -> graph node id by the preferred_label inside each node label."""
     return {pid: node_id for node_id, label in labels.items() for pid, name in NAMES.items() if name in label}
@@ -253,10 +371,13 @@ class CaseTestBase(unittest.TestCase):
             check=True, capture_output=True,
         )
 
-    def write_fixture(self, persons: dict | None = None, relationships: dict | None = None) -> None:
-        """Write the registers; `persons`/`relationships` map a row id to field overrides."""
-        self.write_register("person-register.csv", PERSONS, "person_id", persons or {})
-        self.write_register("relationship-register.csv", RELATIONSHIPS, "relationship_id", relationships or {})
+    def write_fixture(self, persons: dict | None = None, relationships: dict | None = None, *,
+                      extra_persons: tuple = (), extra_relationships: tuple = ()) -> None:
+        """Write the registers; `persons`/`relationships` map a row id to field overrides, the extra
+        rows follow the fixture's."""
+        self.write_register("person-register.csv", PERSONS + extra_persons, "person_id", persons or {})
+        self.write_register("relationship-register.csv", RELATIONSHIPS + extra_relationships, "relationship_id",
+                            relationships or {})
         self.write_register("artifact-register.csv", ARTIFACTS, "artifact_id", {})
         self.write_register("claims-register.csv", CLAIMS, "claim_id", {})
 
@@ -284,10 +405,17 @@ class CaseTestBase(unittest.TestCase):
         return proc
 
     def snapshot(self) -> dict:
-        return {path.name: path.read_bytes() for path in self.tree.iterdir()} if self.tree.exists() else {}
+        """Every file under tree/, keyed by its path relative to tree/."""
+        return {path.relative_to(self.tree).as_posix(): path.read_bytes()
+                for path in sorted(self.tree.rglob("*")) if path.is_file()}
+
+    def folders(self) -> set:
+        return {path.relative_to(self.tree).as_posix() for path in self.tree.rglob("*") if path.is_dir()}
 
     def read(self, name: str) -> str:
-        return (self.tree / name).read_text(encoding="utf-8")
+        path = self.tree / name
+        self.assertTrue(path.is_file(), f"tree/{name} not written")
+        return path.read_text(encoding="utf-8")
 
     def assert_counts(self, stdout: str, persons: int, relations: int, hidden: int) -> None:
         for name, number in (("лица", persons), ("связи", relations), ("скрыто живых", hidden)):
@@ -300,13 +428,13 @@ class OutputsPerMode(CaseTestBase):
         proc = self.build()
         self.assertEqual(set(self.snapshot()), set(PRIVATE))
         for name in PRIVATE:
-            self.assertIn(name, proc.stdout)
+            self.assertIn(str(Path("tree", name)), proc.stdout)
         self.assert_counts(proc.stdout, 6, 7, 0)
 
         proc = self.build("--exclude-living")
         self.assertEqual(set(self.snapshot()), set(PRIVATE) | set(SHARED))
         for name in SHARED:
-            self.assertIn(name, proc.stdout)
+            self.assertIn(str(Path("tree", name)), proc.stdout)
         self.assert_counts(proc.stdout, 6, 7, 1)
 
     def test_output_is_deterministic(self):
@@ -319,7 +447,23 @@ class OutputsPerMode(CaseTestBase):
     def test_empty_registers_build(self):
         self.build()
         self.assertEqual(set(self.snapshot()), set(PRIVATE))
-        self.assertIn("В реестре нет лиц", html.unescape(self.read("tree.private.html")))
+        self.assertIn("В реестре нет лиц", html.unescape(self.read("private/tree.private.html")))
+
+    def test_rows_without_id_are_left_out(self):
+        unnamed = ("Безымянный Первый", "Безымянная Вторая")
+        self.write_fixture(extra_persons=(person("", unnamed[0], "deceased", "1801", "1870"),
+                                          person("", unnamed[1], "deceased", "1802", "1871")))
+        proc = self.build()
+        self.assertRegex(proc.stdout.replace(str(self.case), ""), r"(?<![\w.])2(?![\w.])")
+        page = self.read("private/tree.private.html")
+        self.assertEqual(sorted(parse_page(page).node_ids), sorted(NAMES))
+        mmd, dot = self.read("private/tree.private.mmd"), self.read("private/tree.private.dot")
+        self.assertEqual(len(MERMAID_NODE.findall(mmd)), 6)
+        self.assertEqual(len(dot_nodes(dot)), 6)
+        for name, text in (("html", page_text(page)), ("mmd", mmd), ("dot", dot)):
+            for label in unnamed:
+                with self.subTest(name, label=label):
+                    self.assertNotIn(label, text)
 
 
 class AuditGate(CaseTestBase):
@@ -355,7 +499,7 @@ class AuditGate(CaseTestBase):
 
         proc = self.build()
         self.assertRegex(proc.stdout, rf"(?<![\w.]){warnings}(?![\w.])")
-        source = self.read("tree.private.html")
+        source = self.read("private/tree.private.html")
         self.assertIn("cousin-of · R-0006", html.unescape(source))
         edge = parse_page(source).edges["R-0006"]
         self.assertIn(edge.get("marker-end", "none").strip(), ("", "none"))
@@ -390,7 +534,7 @@ class Privacy(CaseTestBase):
                 self.assertIn("Анна Петрова", text)
                 self.assertTrue(has_year(text, "1950"))
                 self.assertIn(BANNER_PRIVATE, text)
-        self.assertIn("со слов Анны Петровой", texts["tree.private.html"])
+        self.assertIn("со слов Анны Петровой", texts["private/tree.private.html"])
 
     def test_shareable_hides_living_everywhere(self):
         self.write_fixture()
@@ -408,8 +552,20 @@ class Privacy(CaseTestBase):
                 self.assertNotIn(BANNER_PRIVATE, text)
                 self.assertIn(EDGE_LABELS["R-0004"], text)
                 self.assertIn(EDGE_LABELS["R-0007"], text)
-        self.assertIn("сведения скрыты", texts["tree.html"])
-        self.assertLessEqual({"R-0004", "R-0007"}, set(parse_page(self.read("tree.html")).edges))
+        self.assertIn("сведения скрыты", texts["share/tree.html"])
+        self.assertLessEqual({"R-0004", "R-0007"}, set(parse_page(self.read("share/tree.html")).edges))
+
+    def test_hidden_edges_drop_relationship_details(self):
+        self.write_fixture(relationships={"R-0004": {"biological_legal_household": "adoptive", "confidence": "low"}})
+        self.build("--exclude-living")
+        data = json.loads(parse_page(self.read("share/tree.html")).tree_data)
+        hidden = json.dumps(panel_entries(data, "R-0004"), ensure_ascii=False)
+        shown = json.dumps(panel_entries(data, "R-0001"), ensure_ascii=False)
+        self.assertIn("R-0004", hidden)
+        for value in ("adoptive", "low"):
+            self.assertIsNone(re.search(rf"\b{value}\b", hidden), value)
+        for value in ("biological", "moderate"):
+            self.assertRegex(shown, rf"\b{value}\b")
 
     def test_unlisted_fields_never_appear(self):
         self.write_fixture()
@@ -428,7 +584,7 @@ class EdgeEncoding(CaseTestBase):
         self.build()
 
     def test_edge_status_and_direction_in_svg(self):
-        edges = parse_page(self.read("tree.private.html")).edges
+        edges = parse_page(self.read("private/tree.private.html")).edges
         self.assertEqual(set(edges), set(EDGE_STATUS))
         for rid, status in EDGE_STATUS.items():
             with self.subTest(rid):
@@ -454,7 +610,7 @@ class EdgeEncoding(CaseTestBase):
         self.assertAlmostEqual(width("R-0001"), 3 * width("R-0002"))
         self.assertNotEqual(edges["R-0003"]["stroke-dasharray"], edges["R-0004"]["stroke-dasharray"])
 
-        page = parse_page(self.read("tree.private.html"))
+        page = parse_page(self.read("private/tree.private.html"))
         self.assertEqual(sorted(text for _, text in page.labels), sorted(EDGE_LABELS.values()))
         self.assertEqual(len(page.node_boxes), 6)
         covered = [(text, node) for attrs, text in page.labels for node in page.node_boxes
@@ -462,7 +618,7 @@ class EdgeEncoding(CaseTestBase):
         self.assertEqual(covered, [], "edge labels under node boxes")
 
     def test_mermaid_and_dot_have_every_node_and_edge(self):
-        mmd, dot = self.read("tree.private.mmd"), self.read("tree.private.dot")
+        mmd, dot = self.read("private/tree.private.mmd"), self.read("private/tree.private.dot")
         mermaid_labels = dict(MERMAID_NODE.findall(mmd))
         self.assertEqual(len(MERMAID_NODE.findall(mmd)), 6)
         dot_labels = dot_nodes(dot)
@@ -502,12 +658,26 @@ class EdgeEncoding(CaseTestBase):
                 else:
                     self.assertEqual(attrs.get("dir"), "none")
 
+    def test_overlapping_edges_are_drawn_apart(self):
+        self.write_fixture(extra_relationships=(
+            relation("R-0008", "P-0006", "godparent-of", "P-0003", "contradicted", "другая метрика"),))
+        self.build()
+        edges = parse_page(self.read("private/tree.private.html")).edges
+        with self.subTest("parallel edges"):
+            self.assertNotEqual(edges["R-0008"]["d"], edges["R-0005"]["d"])
+        with self.subTest("long edge over a node"):
+            left, top, right, bottom = parse_page(self.read("private/tree.private.html")).box_of["P-0003"]
+            points = path_points(edges["R-0007"]["d"])
+            self.assertTrue(points)
+            inside = [point for point in points if left < point[0] < right and top < point[1] < bottom]
+            self.assertEqual(inside[:3], [], f"R-0007 ({edges['R-0007']['d']}) crosses P-0003's box")
+
 
 class InteractivePage(CaseTestBase):
     def test_page_has_no_network_references(self):
         self.write_fixture()
         self.build()
-        source = self.read("tree.private.html")
+        source = self.read("private/tree.private.html")
         for pattern in (r"<link\b", r"\b(?:src|href)\s*=\s*[\"']?\s*https?:",
                         r"url\(\s*[\"']?\s*https?:", r"@import[^;]*https?:"):
             with self.subTest(pattern):
@@ -517,16 +687,31 @@ class InteractivePage(CaseTestBase):
         payload = 'Иван "</script><script>alert(1)</script>'
         self.write_fixture(persons={"P-0001": {"preferred_label": payload}})
         self.build()
-        source = self.read("tree.private.html")
+        source = self.read("private/tree.private.html")
         self.assertEqual(len(re.findall(r"<script\b", source, re.IGNORECASE)), 2)
         self.assertIn(payload, page_text(source))
-        mmd, dot = self.read("tree.private.mmd"), self.read("tree.private.dot")
+        mmd, dot = self.read("private/tree.private.mmd"), self.read("private/tree.private.dot")
         self.assertIn("Иван #quot;", mmd)
         self.assertNotIn('Иван "', mmd)
         self.assertEqual(len(MERMAID_NODE.findall(mmd)), 6)
         self.assertIn('Иван \\"', dot)
         self.assertEqual(len(dot_nodes(dot)), 6)
         self.assertEqual(set(dot_edges(dot)), set(EDGE_LABELS))
+
+    def test_control_characters_keep_svg_well_formed(self):
+        self.write_fixture(persons={"P-0001": {"preferred_label": "Иван\x0bПетров"},
+                                    "P-0002": {"preferred_label": "Мария &lt; Петрова"}})
+        self.build()
+        svgs = re.findall(r"<svg\b.*?</svg>", self.read("private/tree.private.html"), re.DOTALL | re.IGNORECASE)
+        self.assertTrue(svgs)
+        for index, svg in enumerate(svgs):
+            with self.subTest(svg=index):
+                try:
+                    ET.fromstring(svg)
+                except ET.ParseError as error:
+                    self.fail(f"SVG is not well-formed XML: {error}")
+        labels = [mermaid_text(label) for _, label in MERMAID_NODE.findall(self.read("private/tree.private.mmd"))]
+        self.assertTrue(any("Мария &lt; Петрова" in label for label in labels), labels)
 
 
 class PrintPage(unittest.TestCase):
@@ -551,7 +736,7 @@ class PrintPage(unittest.TestCase):
 class MissingBrowser(CaseTestBase):
     def test_missing_browser_exit_3_keeps_other_files(self):
         self.write_fixture()
-        self.tree.mkdir()
+        (self.tree / "private").mkdir(parents=True)
         earlier = b"%PDF-1.4 earlier build\n"
         (self.tree / PRIVATE_PDF).write_bytes(earlier)
         env = {key: value for key, value in os.environ.items() if key != "CHROME_PATH"}
@@ -563,6 +748,35 @@ class MissingBrowser(CaseTestBase):
         self.assertEqual((self.tree / PRIVATE_PDF).read_bytes(), earlier)
         self.assertIn("--chrome", proc.stderr)
         self.assertIn("CHROME_PATH", proc.stderr)
+
+    def test_shareable_missing_browser_removes_stale_pdf(self):
+        self.write_fixture()
+        stale = self.tree / SHARED_PDF
+        stale.parent.mkdir(parents=True)
+        stale.write_bytes(b"%PDF-1.4 earlier shareable build\n")
+        env = {key: value for key, value in os.environ.items() if key != "CHROME_PATH"}
+        if CHROME:
+            env["CHROME_PATH"] = CHROME  # a named path that does not exist must win over a working one
+        proc = self.run_tree("--exclude-living", "--chrome", str(Path(self.tmp.name) / "no-such-browser"), env=env)
+        self.assert_exit(proc, 3)
+        self.assertFalse(stale.exists())
+        self.assertEqual(set(self.snapshot()), set(SHARED))
+
+    def test_shareable_no_pdf_removes_stale_pdf(self):
+        self.write_fixture()
+        self.build()
+        (self.tree / "private").mkdir(parents=True, exist_ok=True)
+        (self.tree / PRIVATE_PDF).write_bytes(b"%PDF-1.4 earlier private build\n")
+        private = self.snapshot()
+        stale = self.tree / SHARED_PDF
+        stale.parent.mkdir(parents=True)
+        stale.write_bytes(b"%PDF-1.4 earlier shareable build\n")
+        proc = self.build("--exclude-living")
+        self.assertFalse(stale.exists())
+        self.assertIn(str(Path("tree", SHARED_PDF)), proc.stdout)
+        after = self.snapshot()
+        self.assertEqual(set(after), set(private) | set(SHARED))
+        self.assertEqual({name: after[name] for name in private}, private)
 
 
 @unittest.skipUnless(CHROME, "Chrome, Chromium or Edge not found")
@@ -576,6 +790,7 @@ class PdfBuild(CaseTestBase):
         self.write_fixture()
         proc = self.build_with_pdf()
         self.assertEqual(set(self.snapshot()), set(PRIVATE) | {PRIVATE_PDF})
+        self.assertEqual(self.folders(), {"private"})
         self.assertTrue((self.tree / PRIVATE_PDF).read_bytes().startswith(b"%PDF-"))
         self.assertEqual(stat.S_IMODE((self.tree / PRIVATE_PDF).stat().st_mode), 0o600)
         self.assert_counts(proc.stdout, 6, 7, 0)
@@ -587,6 +802,7 @@ class PdfBuild(CaseTestBase):
         proc = self.build_with_pdf("--exclude-living")
         after = self.snapshot()
         self.assertEqual(set(after), set(private) | set(SHARED) | {SHARED_PDF})
+        self.assertEqual(self.folders(), {"private", "share"})
         self.assertEqual({name: after[name] for name in private}, private)
         self.assertTrue(after[SHARED_PDF].startswith(b"%PDF-"))
         self.assert_counts(proc.stdout, 6, 7, 1)

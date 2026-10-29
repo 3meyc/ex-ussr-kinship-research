@@ -91,6 +91,18 @@ def close_run(first, second, end_ys):
     return total
 
 
+def meet(first, second):
+    """Whether two corner lists share a point: a crossing, a touch or a common stretch."""
+    for vertical, fixed, low, high in segments(first):
+        for other_vertical, other_fixed, other_low, other_high in segments(second):
+            if vertical == other_vertical:
+                if fixed == other_fixed and max(low, other_low) <= min(high, other_high):
+                    return True
+            elif other_low <= fixed <= other_high and low <= other_fixed <= high:
+                return True
+    return False
+
+
 def ends_and_sides(routes, relationships):
     """(relationship_id, person_id, end, middle of the end's box side) for both ends of every path."""
     paths = paths_by_id(routes, relationships)
@@ -381,6 +393,27 @@ class EdgeGeometryTest(unittest.TestCase):
             if (run := close_run(paths[first], paths[second], end_ys)) > 12
         ]
         self.assertEqual(runs, [])
+
+    def test_lanes_of_a_pair_never_cross(self):
+        # P-0000's bottom side holds 76 ends (a 1 px step), P-0001's top side 57 (2 px): neighbouring
+        # lanes of the P-0000–P-0001 pair each end 1–5 px short of overtaking the other.
+        relationships = [
+            relationship(f"R-{number:04d}", "P-0000", "parent-of", "P-0001") for number in range(57)
+        ] + [relationship(f"R-{number:04d}", "P-0003", "other", "P-0000") for number in range(57, 76)]
+
+        _, routes = routed(persons_of(relationships), relationships)
+
+        paths = paths_by_id(routes, relationships, corners)
+        pairs = {}
+        for row in relationships:
+            pairs.setdefault(frozenset((row["person_a_id"], row["person_b_id"])), []).append(row["relationship_id"])
+        crossings = [
+            (first, second)
+            for lanes in pairs.values()
+            for first, second in itertools.combinations(lanes, 2)
+            if meet(paths[first], paths[second])
+        ]
+        self.assertEqual(crossings, [])
 
     def test_edge_runs_straight_onto_its_own_channel_off_the_grid(self):
         relationships = relationships_from(

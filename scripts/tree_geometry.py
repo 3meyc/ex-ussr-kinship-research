@@ -8,7 +8,8 @@
 друг друга не пересекают. Каждый путь ортогонален: отвесно от порта на стороне узла, по горизонтали
 в промежутке между строками, отвесно через свободный канал строки, которую пересекает. Порты одной
 стороны ставит один перебор раскладок по возрастанию стоимости (_side_starts): дорожки подальше от
-чужих каналов, на сетке стороны, ровно на своём отвесном участке, ближе к середине стороны.
+чужих каналов, у верхней стороны — и от нижних портов чужих пар над тем же промежутком, на сетке
+стороны, ровно на своём отвесном участке, ближе к середине стороны.
 Отвесные участки разных путей стоят на разных x, горизонтали с общим отрезком x — на разных высотах;
 где промежутку не хватает высоты, строки ниже сдвигаются, где строке не хватает каналов, холст
 расширяется вправо.
@@ -44,9 +45,10 @@ _WIDE_LOWERCASE = frozenset("жмшщыюmw")
 
 _HALF_HEIGHT = NODE_HEIGHT // 2
 _LANE = 12  # шаг портов на стороне узла и наименьший зазор между параллельными участками путей
-# Отвесные участки ближе этого по x считаются одной линией. Порты нижних сторон узлов стоят на x,
-# кратных _LANE, верхних — со сдвигом на половину шага, поэтому отвесные участки от узлов строки
-# выше и к узлам строки ниже в одном промежутке не совпадают.
+# Отвесные участки ближе этого по x считаются одной линией. Порты нижних сторон узлов стараются
+# встать на x, кратные _LANE, верхних — со сдвигом на половину шага (_PHASE), чтобы отвесные участки
+# от узлов строки выше и к узлам строки ниже в одном промежутке расходились. Сетка — лишь член
+# стоимости (_port_cost): где сторона с неё сходит, верхние порты держит от нижних отдельный член.
 _NEAR = _LANE // 2
 _PHASE = {"bottom": 0, "top": _LANE // 2}
 # Ни один конец пути не дальше этого от середины стороны: на прямом участке рамки, до скругления.
@@ -211,11 +213,13 @@ def _channels(
     bundles: Sequence[_Bundle], grid: _Grid, width: int
 ) -> tuple[dict[int, tuple[int, ...]], dict[int, list[tuple[int, int]]], int]:
     """x середины канала пучка в каждой строке между его концами (сверху вниз), каналы каждой строки
-    ((x середины, половина ширины пучка)) и ширина холста, которая их вмещает. Канал — ближайший к прямой между центрами концов x, где весь пучок (дорожки
-    через _LANE) отстоит от узлов на _CLEARANCE, от прежних каналов строки на _LANE и от чужих каналов
-    соседних строк на _NEAR (их отвесные участки встречаются в общем промежутке), и который не встаёт
-    в 1–5 px от канала того же пучка строкой выше; если такого нет, канал встаёт правее всего в строке,
-    а холст расширяется."""
+    ((x середины, половина ширины пучка)) и ширина холста, которая их вмещает.
+
+    Канал — свободный x, где весь пучок (дорожки через _LANE) отстоит от узлов на _CLEARANCE, от
+    прежних каналов строки на _LANE и от чужих каналов соседних строк на _NEAR (их отвесные участки
+    встречаются в общем промежутке): из свободных — не в 1–5 px от канала того же пучка строкой выше,
+    если такой есть, а среди них ближайший к прямой между центрами концов. Если свободного x нет,
+    канал встаёт правее всего в строке без оглядки на канал строкой выше, а холст расширяется."""
     taken: dict[int, list[tuple[int, int, int]]] = {}  # строка → (x, половина ширины, пучок)
     channels = {}
     for index, bundle in enumerate(bundles):
@@ -270,19 +274,26 @@ def _stations(
 ) -> list[list[tuple[int, ...]]]:
     """x дорожек каждого пучка слева направо на каждом отвесном участке от first к last: порт на
     стороне узла first, каналы, порт на стороне узла last. На стороне узла дорожки стоят через её шаг
-    (_spacing), в канале — через _LANE; порт, ещё не размеченный, — None."""
+    (_spacing), в канале — через _LANE; порт, ещё не размеченный, — None. Верхняя сторона знает
+    нижние порты чужих пар над своим промежутком: они размечены раньше (_side_order)."""
     paths: list[list[tuple[int, ...] | None]] = [
         [None, *(_lanes(x - bundle.half, bundle.count, _LANE) for x in channels.get(index, ())), None]
         for index, bundle in enumerate(bundles)
     ]
+    legs: dict[int, list[tuple[int, int]]] = {}  # строка → (x, пучок) дорожек нижних портов её узлов
     for (person_id, side), entries in _side_order(bundles, grid, channels):
         step = side_spacing[person_id, side]
         counts = [bundles[index].count for index, _ in entries]
         row = grid.row_of[person_id] + (1 if side == "bottom" else -1)
         own = [_own_lanes(bundles[index], end, paths[index]) for index, end in entries]
-        starts = _side_starts(grid.xs[person_id], counts, step, _PHASE[side], row_channels.get(row, ()), own)
+        on_side = {index for index, _ in entries}
+        across = [x for x, owner in legs.get(row, ()) if owner not in on_side] if side == "top" else []
+        starts = _side_starts(grid.xs[person_id], counts, step, _PHASE[side], row_channels.get(row, ()), across, own)
         for (index, end), count, start in zip(entries, counts, starts):
-            paths[index][0 if end == 0 else -1] = _lanes(start, count, step)
+            lanes = _lanes(start, count, step)
+            paths[index][0 if end == 0 else -1] = lanes
+            if side == "bottom":
+                legs.setdefault(grid.row_of[person_id], []).extend((x, index) for x in lanes)
     return paths  # type: ignore[return-value]  # все порты размечены
 
 
@@ -325,14 +336,15 @@ def _side_starts(
     step: int,
     phase: int,
     channels: Sequence[tuple[int, int]],
+    across: Sequence[int],
     own: Sequence[tuple[int, ...] | None],
 ) -> list[int]:
     """x первой дорожки каждого пучка стороны (в их порядке): дорожки пучка через step, пучки подряд не
     ближе step (на тесной стороне, где step меньше _LANE, — ровно через step), все в пределах
     ±_END_REACH от середины стороны centre (_spacing держит их ширину в 2 × _END_REACH). Из всех таких
     раскладок — с наименьшей суммой _port_cost по пучкам, сравниваемой по порядку: дорожки у каналов,
-    дорожки вне сетки, дорожки не на своём участке, отступ от раскладки по середине стороны; при
-    равенстве — левее.
+    дорожки у чужих дорожек across по ту сторону промежутка, дорожки вне сетки, дорожки не на своём
+    участке, отступ от раскладки по середине стороны; при равенстве — левее.
 
     Динамика по пучкам слева направо: у пучка i допустимы x от lows[i] на size шагов в 1 px, и при x на
     offset от lows[i] пучок i − 1 стоит не правее x на offset от lows[i − 1] (ровно там на тесной
@@ -347,20 +359,22 @@ def _side_starts(
     for width in widths:
         lows.append(centre - _END_REACH + before)
         before += width + step
-    # Все дорожки стороны лежат в centre ± _END_REACH: близость к каналам считается один раз на x.
-    near = {x: _near_channel(x, channels) for x in range(centre - _END_REACH, centre + _END_REACH + 1)}
+    # Все дорожки стороны лежат в centre ± _END_REACH: близость к каналам и к across считается один раз на x.
+    window = range(centre - _END_REACH, centre + _END_REACH + 1)
+    near = {x: _near_channel(x, channels) for x in window}
+    beside = {x: _near((x,), across) for x in window}
     # best[i][offset] — наименьшая сумма стоимостей пучков 0..i при первой дорожке пучка i на lows[i] + offset
     # и x пучка i − 1 в этой сумме.
     best: list[list[tuple[tuple[int, ...], int]]] = []
     for item, (count, low) in enumerate(zip(counts, lows)):
-        costs = [_port_cost(low + offset, count, step, phase, near, own[item], low + shift) for offset in range(size)]
+        costs = [_port_cost(low + offset, count, step, phase, near, beside, own[item], low + shift) for offset in range(size)]
         if not item:
             best.append([(cost, low + offset) for offset, cost in enumerate(costs)])
             continue
         previous = [(cost, lows[item - 1] + offset) for offset, (cost, _) in enumerate(best[-1])]
         if spread:  # лучшая сумма с пучком i − 1 не правее
             previous = list(itertools.accumulate(previous, min))
-        best.append([(tuple(map(sum, zip(cost, before))), back) for cost, (before, back) in zip(costs, previous)])
+        best.append([(tuple(map(sum, zip(cost, prior))), back) for cost, (prior, back) in zip(costs, previous)])
     offset = min(range(size), key=lambda offset: best[-1][offset][0])  # при равенстве — левее
     starts = [lows[-1] + offset]
     for item in range(len(counts) - 1, 0, -1):
@@ -374,23 +388,26 @@ def _port_cost(
     step: int,
     phase: int,
     near: Mapping[int, bool],
+    beside: Mapping[int, bool],
     own: tuple[int, ...] | None,
     ideal: int,
-) -> tuple[int, int, int, int]:
+) -> tuple[int, int, int, int, int]:
     """Стоимость пучка из count дорожек через step с первой на x: (сколько дорожек у каналов (near: x →
-    ближе ли он _NEAR к краю канала, _near_channel) или в 1–5 px от своего участка own, сколько не на сетке
+    ближе ли он _NEAR к краю канала, _near_channel) или в 1–5 px от своего участка own, сколько на чужой
+    дорожке по ту сторону промежутка или в 1–5 px от неё (beside: x → так ли это), сколько не на сетке
     _LANE со сдвигом phase, сколько не на своём участке own, отступ x от ideal). Дорожка ровно на своём
     участке идёт к нему отвесно: она не теснит каналы и не нуждается в фазе."""
-    close = off_phase = off_own = 0
+    close = crowded = off_phase = off_own = 0
     for lane in range(count):
         lane_x = x + lane * step
         target = None if own is None else own[lane]
         if lane_x == target:
             continue
         close += _jog(lane_x, target) or near[lane_x]
+        crowded += beside[lane_x]
         off_phase += (lane_x - phase) % _LANE != 0
         off_own += target is not None
-    return close, off_phase, off_own, abs(x - ideal)
+    return close, crowded, off_phase, off_own, abs(x - ideal)
 
 
 def _near_channel(x: int, channels: Sequence[tuple[int, int]]) -> bool:
@@ -596,14 +613,19 @@ def _lane_ranks(top: Sequence[int], bottom: Sequence[int]) -> list[int]:
     верхний. Пучок, идущий вправо, кладёт правые дорожки выше, идущий влево — левые: так дорожки
     вкладываются друг в друга. Если шаги дорожек сверху и снизу разные, дорожка может обогнать соседнюю:
     левая, чей низ правее верха правой, идёт ниже неё, правая, чей низ левее верха левой, — ниже левой;
-    иначе их горизонтали пересекли бы отвесные участки друг друга."""
+    иначе их горизонтали пересекли бы отвесные участки друг друга. Дорожке, которой до обгона не хватает
+    1–5 px, ряд даётся как обогнавшей, иначе их отвесные участки прошли бы в 1–5 px друг от друга; если
+    так близко к обгону подходят обе, порядок по умолчанию остаётся: два встречных правила дали бы
+    цикл, и дорожки бы пересеклись."""
     count = len(top)
     pending = sorted(range(count), reverse=sum(bottom) >= sum(top))
     above: list[set[int]] = [set() for _ in range(count)]  # above[p] — дорожки, чья горизонталь выше p
     for left, right in itertools.combinations(range(count), 2):
-        if bottom[left] >= top[right]:
+        left_near = bottom[left] > top[right] - _NEAR  # низ левой правее верха правой или левее меньше чем на _NEAR
+        right_near = bottom[right] < top[left] + _NEAR
+        if bottom[left] >= top[right] or (left_near and not right_near):
             above[left].add(right)
-        elif bottom[right] <= top[left]:
+        elif bottom[right] <= top[left] or (right_near and not left_near):
             above[right].add(left)
     ranks = [0] * count
     for rank in range(count):

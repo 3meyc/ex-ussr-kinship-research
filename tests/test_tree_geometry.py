@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 import sys
 import unittest
 from pathlib import Path
@@ -62,6 +63,32 @@ def persons_of(relationships):
 def paths_by_id(routes, relationships, points=coordinates):
     """relationship_id → path points; routes.edges follow relationship_id order."""
     return dict(zip(sorted(row["relationship_id"] for row in relationships), map(points, routes.edges)))
+
+
+def segments(points):
+    """(is vertical, fixed coordinate, low, high) of each straight segment between consecutive corners."""
+    result = []
+    for (x1, y1), (x2, y2) in zip(points, points[1:]):
+        vertical = x1 == x2
+        fixed, start, end = (x1, y1, y2) if vertical else (y1, x1, x2)
+        result.append((vertical, fixed, min(start, end), max(start, end)))
+    return result
+
+
+def close_run(first, second, end_ys):
+    """Total length over which two corner lists run parallel within 3 px of each other, leaving out
+    vertical stretches within 10 px of the end sides at end_ys."""
+    floor, ceiling = min(end_ys) + 10, max(end_ys) - 10
+    total = 0
+    for vertical, fixed, low, high in segments(first):
+        for other_vertical, other_fixed, other_low, other_high in segments(second):
+            if vertical != other_vertical or abs(fixed - other_fixed) >= 3:
+                continue
+            start, end = max(low, other_low), min(high, other_high)
+            if vertical:
+                start, end = max(start, floor), min(end, ceiling)
+            total += max(0, end - start)
+    return total
 
 
 def ends_and_sides(routes, relationships):
@@ -310,6 +337,50 @@ class EdgeGeometryTest(unittest.TestCase):
             if left[1] == right[1] and 0 < abs(right[0] - left[0]) < 6
         ]
         self.assertEqual(jogs, [])
+
+    def test_lanes_of_a_pair_with_different_end_steps_never_run_within_3_px(self):
+        # P-0000's bottom side holds 16 ends (an 8 px step), P-0003's top side 9 (12 px): a lane
+        # 1–5 px short of overtaking its neighbour in the gap must still be ordered as overtaking.
+        relationships = relationships_from(
+            [
+                "R-0002 P-0005 half-sibling-of P-0007",
+                "R-0006 P-0000 grandparent-of P-0002",
+                "R-0010 P-0003 parent-of P-0004",
+                "R-0011 P-0003 godparent-of P-0004",
+                "R-0012 P-0003 other P-0004",
+                "R-0017 P-0000 parent-of P-0003",
+                "R-0023 P-0000 parent-of P-0002",
+                "R-0028 P-0000 parent-of P-0002",
+                "R-0029 P-0000 spouse-of P-0002",
+                "R-0030 P-0000 parent-of P-0002",
+                "R-0031 P-0000 parent-of P-0002",
+                "R-0039 P-0000 parent-of P-0007",
+                "R-0043 P-0005 half-sibling-of P-0006",
+                "R-0044 P-0000 parent-of P-0003",
+                "R-0045 P-0000 parent-of P-0003",
+                "R-0046 P-0000 parent-of P-0003",
+                "R-0053 P-0000 parent-of P-0003",
+                "R-0055 P-0000 spouse-of P-0004",
+                "R-0062 P-0000 spouse-of P-0003",
+                "R-0063 P-0000 parent-of P-0003",
+                "R-0064 P-0000 sibling-of P-0003",
+                "R-0065 P-0000 sibling-of P-0003",
+            ]
+        )
+
+        _, routes = routed(persons_of(relationships), relationships)
+
+        paths = paths_by_id(routes, relationships, corners)
+        pair = sorted(
+            row["relationship_id"] for row in relationships if {row["person_a_id"], row["person_b_id"]} == {"P-0000", "P-0003"}
+        )
+        end_ys = (routes.positions["P-0000"][1] + 24, routes.positions["P-0003"][1] - 24)
+        runs = [
+            (first, second, run)
+            for first, second in itertools.combinations(pair, 2)
+            if (run := close_run(paths[first], paths[second], end_ys)) > 12
+        ]
+        self.assertEqual(runs, [])
 
     def test_edge_runs_straight_onto_its_own_channel_off_the_grid(self):
         relationships = relationships_from(

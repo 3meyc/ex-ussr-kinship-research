@@ -574,7 +574,7 @@ class OutputsPerMode(CaseTestBase):
         self.write_fixture(extra_persons=(person("", unnamed[0], "deceased", "1801", "1870"),
                                           person("", unnamed[1], "deceased", "1802", "1871")))
         proc = self.build()
-        self.assertRegex(proc.stdout.replace(str(self.case), ""), r"(?<![\w.])2(?![\w.])")
+        self.assertRegex(proc.stdout, r"(?m)^Не показано строк\b.*(?<![\w.])2$")
         page = self.read("private/tree.private.html")
         self.assertEqual(sorted(parse_page(page).node_ids), sorted(NAMES))
         mmd, dot = self.read("private/tree.private.mmd"), self.read("private/tree.private.dot")

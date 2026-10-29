@@ -59,9 +59,9 @@ def persons_of(relationships):
     ]
 
 
-def paths_by_id(routes, relationships):
+def paths_by_id(routes, relationships, points=coordinates):
     """relationship_id → path points; routes.edges follow relationship_id order."""
-    return dict(zip(sorted(row["relationship_id"] for row in relationships), map(coordinates, routes.edges)))
+    return dict(zip(sorted(row["relationship_id"] for row in relationships), map(points, routes.edges)))
 
 
 def ends_and_sides(routes, relationships):
@@ -302,7 +302,7 @@ class EdgeGeometryTest(unittest.TestCase):
         _, routes = routed(persons_of(relationships), relationships)
 
         # A horizontal segment joins two consecutive corners at one y.
-        paths = dict(zip(sorted(row["relationship_id"] for row in relationships), map(corners, routes.edges)))
+        paths = paths_by_id(routes, relationships, corners)
         jogs = [
             (relationship_id, left, right)
             for relationship_id, points in paths.items()

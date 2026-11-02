@@ -1,0 +1,92 @@
+{
+  "title": {
+    "ru": "Граф родства",
+    "uk": "Граф спорідненості",
+    "en": "Kinship graph"
+  },
+  "banner.private": {
+    "ru": "Содержит сведения о живых лицах — не для передачи",
+    "uk": "Містить відомості про живих осіб — не для передачі",
+    "en": "Contains details of living people — do not share"
+  },
+  "banner.shareable": {
+    "ru": "Живые лица скрыты: показан только person_id",
+    "uk": "Живих осіб приховано: показано лише person_id",
+    "en": "Living people are hidden: only person_id is shown"
+  },
+  "note.hidden": {
+    "ru": "сведения скрыты",
+    "uk": "відомості приховано",
+    "en": "details hidden"
+  },
+  "note.empty": {
+    "ru": "В реестре нет лиц",
+    "uk": "У реєстрі немає осіб",
+    "en": "The register has no people"
+  },
+  "panel.hint": {
+    "ru": "Нажмите на лицо или связь, чтобы увидеть сведения. Колесо мыши — масштаб, перетаскивание — сдвиг.",
+    "uk": "Натисніть на особу або зв'язок, щоб побачити відомості. Колесо миші — масштаб, перетягування — зсув.",
+    "en": "Click a person or a relationship to see its details. The mouse wheel zooms, dragging pans."
+  },
+  "legend": {
+    "ru": "Легенда",
+    "uk": "Легенда",
+    "en": "Legend"
+  },
+  "status.strongly-corroborated": {
+    "ru": "надёжно подтверждена",
+    "uk": "надійно підтверджений",
+    "en": "strongly corroborated"
+  },
+  "status.corroborated": {
+    "ru": "подтверждена",
+    "uk": "підтверджений",
+    "en": "corroborated"
+  },
+  "status.single-source": {
+    "ru": "один источник",
+    "uk": "одне джерело",
+    "en": "one source"
+  },
+  "status.hypothesis": {
+    "ru": "гипотеза",
+    "uk": "гіпотеза",
+    "en": "hypothesis"
+  },
+  "status.unresolved": {
+    "ru": "не решена или статус не указан",
+    "uk": "не розв'язаний або статус не вказано",
+    "en": "unresolved, or no status given"
+  },
+  "status.contradicted": {
+    "ru": "противоречит источникам",
+    "uk": "суперечить джерелам",
+    "en": "contradicted by sources"
+  },
+  "arrow_note": {
+    "ru": "Стрелка идёт от person_a к person_b у {types}.",
+    "uk": "Стрілка йде від person_a до person_b у {types}.",
+    "en": "The arrow points from person_a to person_b for {types}."
+  },
+  "and": {
+    "ru": "и",
+    "uk": "і",
+    "en": "and"
+  },
+  "button.reset": {
+    "ru": "Исходный вид",
+    "uk": "Початковий вигляд",
+    "en": "Reset view"
+  },
+  "button.print": {
+    "ru": "Сохранить PDF",
+    "uk": "Зберегти PDF",
+    "en": "Save as PDF"
+  },
+  "language": {
+    "ru": "Язык",
+    "uk": "Мова",
+    "en": "Language"
+  }
+}

@@ -27,9 +27,10 @@ ASSETS = ROOT / "assets"
 sys.path.insert(0, str(SCRIPTS))
 
 from build_pdf import find_chrome, inspect_html
+from tree_i18n import load_vocabulary
 from tree_layout import layout
 from tree_model import build_graph
-from tree_render import render_print_page, render_svg
+from tree_render import page_texts, render_print_page, render_svg
 
 CHROME = find_chrome(None)
 
@@ -941,7 +942,8 @@ class InteractivePage(CaseTestBase):
         self.write_fixture(persons={"P-0001": {"preferred_label": payload}})
         self.build()
         source = self.read("private/tree.private.html")
-        self.assertEqual(len(re.findall(r"<script\b", source, re.IGNORECASE)), 2)
+        # #i18n, #tree-data and the page script; the payload adds none.
+        self.assertEqual(len(re.findall(r"<script\b", source, re.IGNORECASE)), 3)
         self.assertIn(payload, page_text(source))
         mmd, dot = self.read("private/tree.private.mmd"), self.read("private/tree.private.dot")
         self.assertIn("Иван #quot;", mmd)
@@ -999,7 +1001,8 @@ class InteractivePage(CaseTestBase):
 class PrintPage(unittest.TestCase):
     def test_print_page_passes_preflight_and_hides_living(self):
         graph = build_graph(PERSONS, RELATIONSHIPS, shareable=True, current_year=2026)
-        page = render_print_page(graph, render_svg(graph, layout(graph)))
+        texts = page_texts(load_vocabulary(), graph)
+        page = render_print_page(graph, render_svg(graph, layout(graph), texts["title"]["ru"]), texts, "ru")
         self.assertEqual(inspect_html(page, Path("tree.html")), ([], []))
         images = [base64.b64decode(data).decode("utf-8")
                   for data in re.findall(r'src="data:image/svg\+xml;base64,([A-Za-z0-9+/=]+)"', page)]
@@ -1088,6 +1091,95 @@ class PdfBuild(CaseTestBase):
         self.assertEqual({name: after[name] for name in private}, private)
         self.assertTrue(after[SHARED_PDF].startswith(b"%PDF-"))
         self.assert_counts(proc.stdout, 6, 7, 1)
+
+
+VOCABULARY = json.loads((ASSETS / "i18n" / "tree.json").read_text(encoding="utf-8"))
+LANGS = ("ru", "uk", "en")
+# Page key → vocabulary key of the texts the markup shows (the banner is the mode's).
+VISIBLE_KEYS = {key: key for key in ("title", "legend", "panel.hint", "button.reset", "button.print")}
+VISIBLE_KEYS.update({"banner": "banner.private"}, **{f"status.{s}": f"status.{s}" for s in set(EDGE_STATUS.values())})
+TRANSLATED = re.compile(r'<\w+[^>]*\bdata-i18n="([^"]+)"[^>]*>([^<]*)<')
+I18N_BLOCK = re.compile(r'<script type="application/json" id="i18n">(.*?)</script>', re.DOTALL)
+TREE_DATA_BLOCK = re.compile(r'<script type="application/json" id="tree-data">(.*?)</script>', re.DOTALL)
+
+
+class Languages(CaseTestBase):
+    def set_intake_language(self, value: str) -> None:
+        intake = self.case / "case-intake.yaml"
+        text = re.sub(r'^requested_output_language:.*$', f'requested_output_language: "{value}"',
+                      intake.read_text(encoding="utf-8"), flags=re.MULTILINE)
+        intake.write_text(text, encoding="utf-8")
+
+    def page_lang(self, name: str = "private/tree.private.html") -> str:
+        return re.search(r'<html lang="(\w+)">', self.read(name)).group(1)
+
+    def test_each_build_language_shows_only_its_own_texts(self):
+        self.write_fixture()
+        for lang in LANGS:
+            with self.subTest(lang):
+                self.build("--lang", lang)
+                source = self.read("private/tree.private.html")
+                self.assertEqual(self.page_lang(), lang)
+                shown = {}
+                for key, text in TRANSLATED.findall(source):
+                    shown.setdefault(key, set()).add(html.unescape(text))
+                for page_key, vocabulary_key in VISIBLE_KEYS.items():
+                    self.assertEqual(shown.get(page_key), {VOCABULARY[vocabulary_key][lang]}, page_key)
+                title = html.escape(VOCABULARY["title"][lang], quote=True)
+                self.assertIn(f"<title>{title}</title>", source)
+                self.assertIn(f'aria-label="{title}"', source)
+
+    def test_every_text_key_of_the_page_is_embedded_in_every_language(self):
+        self.write_fixture()
+        self.build()
+        source = self.read("private/tree.private.html")
+        embedded = json.loads(I18N_BLOCK.search(source).group(1))
+        keys = set(re.findall(r'data-i18n(?:-aria)?="([^"]+)"', source))
+        self.assertIn("banner", keys)
+        for key in keys | {"note.hidden"}:  # the script shows note.hidden in the panel
+            with self.subTest(key):
+                self.assertEqual(set(embedded["texts"][key]), set(LANGS))
+
+    def test_shareable_page_never_holds_private_texts_in_any_language(self):
+        self.write_fixture()
+        data_blocks = set()
+        for lang in LANGS:
+            with self.subTest(lang):
+                self.build("--exclude-living", "--lang", lang)
+                source = self.read("share/tree.html")
+                for private in VOCABULARY["banner.private"].values():
+                    self.assertNotIn(private, source)
+                data_blocks.add(TREE_DATA_BLOCK.search(source).group(1))
+        self.assertEqual(len(data_blocks), 1, "tree data differs between build languages")
+
+    def test_page_prints_through_the_browser(self):
+        self.write_fixture()
+        self.build()
+        source = self.read("private/tree.private.html")
+        self.assertIn("window.print()", source)
+        self.assertIn("@media print", source)
+
+    def test_mermaid_and_dot_banner_in_build_language(self):
+        self.write_fixture()
+        self.build("--lang", "en")
+        banner = VOCABULARY["banner.private"]["en"]
+        self.assertEqual(self.read("private/tree.private.mmd").splitlines()[0], f"%% {banner}")
+        self.assertEqual(self.read("private/tree.private.dot").splitlines()[0], f"// {banner}")
+
+    def test_build_language_order(self):
+        self.write_fixture()
+        self.set_intake_language("en")
+        self.build()
+        self.assertEqual(self.page_lang(), "en")
+        self.build("--lang", "uk")
+        self.assertEqual(self.page_lang(), "uk")
+        for value in ("pl", "auto"):
+            with self.subTest(value):
+                self.set_intake_language(value)
+                proc = self.build()
+                self.assertEqual(self.page_lang(), "ru")
+                self.assertIn(repr(value), proc.stdout)
+        self.assert_exit(self.run_tree("--no-pdf", "--lang", "de"), 2)
 
 
 if __name__ == "__main__":

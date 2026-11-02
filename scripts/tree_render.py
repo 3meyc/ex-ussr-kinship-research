@@ -24,18 +24,19 @@ from tree_geometry import (
     node_box,
     route,
 )
+from tree_i18n import LANGUAGES
 from tree_model import DIRECTED_TYPES, STATUSES
 
 if TYPE_CHECKING:
     from tree_geometry import Command, Point
+    from tree_i18n import Vocabulary
     from tree_layout import Layout
     from tree_model import Edge, Graph, Node
 
-BANNER_PRIVATE = "Содержит сведения о живых лицах — не для передачи"
-BANNER_SHAREABLE = "Живые лица скрыты: показан только person_id"
-HIDDEN_NOTE = "сведения скрыты"
-EMPTY_NOTE = "В реестре нет лиц"
-TITLE = "Граф родства"
+    # Тексты одной страницы: ключ → {язык → текст}, уже выбранные по режиму графа и с подставленными
+    # значениями. Подписи берутся только отсюда (tree_i18n); в передаваемый вид не попадает баннер
+    # рабочего вида ни на одном языке.
+    PageTexts = dict[str, dict[str, str]]
 
 _INK = "#333333"
 
@@ -51,30 +52,43 @@ class _Encoding:
     dot_colour: str  # пусто — цвет Graphviz по умолчанию
     mermaid_directed: str
     mermaid_undirected: str
-    meaning: str  # подпись в легенде
 
 
 _ENCODINGS = {
-    "strongly-corroborated": _Encoding(_INK, 4.5, "", "bold", "", "==>", "===", "надёжно подтверждена"),
-    "corroborated": _Encoding(_INK, 1.5, "", "solid", "", "-->", "---", "подтверждена"),
-    "single-source": _Encoding(_INK, 1.5, "8 5", "dashed", "", "-.->", "-.-", "один источник"),
-    "hypothesis": _Encoding(_INK, 1.5, "2 5", "dotted", "", "-.->", "-.-", "гипотеза"),
-    "unresolved": _Encoding("#888888", 1.5, "", "solid", "grey", "-->", "---", "не решена или статус не указан"),
-    "contradicted": _Encoding("#c62828", 1.5, "", "solid", "red", "-->", "---", "противоречит источникам"),
+    "strongly-corroborated": _Encoding(_INK, 4.5, "", "bold", "", "==>", "==="),
+    "corroborated": _Encoding(_INK, 1.5, "", "solid", "", "-->", "---"),
+    "single-source": _Encoding(_INK, 1.5, "8 5", "dashed", "", "-.->", "-.-"),
+    "hypothesis": _Encoding(_INK, 1.5, "2 5", "dotted", "", "-.->", "-.-"),
+    "unresolved": _Encoding("#888888", 1.5, "", "solid", "grey", "-->", "---"),
+    "contradicted": _Encoding("#c62828", 1.5, "", "solid", "red", "-->", "---"),
 }
-_ARROW_NOTE = f"Стрелка идёт от person_a к person_b у {', '.join(DIRECTED_TYPES[:-1])} и {DIRECTED_TYPES[-1]}."
 
 _NODE_PADDING = 6  # поле слева и справа от текста в узле
 
 
-def banner(graph: Graph) -> str:
-    return BANNER_SHAREABLE if graph.shareable else BANNER_PRIVATE
+def page_texts(vocabulary: Vocabulary, graph: Graph) -> PageTexts:
+    """Тексты страниц графа на всех языках; `banner` — баннер режима графа."""
+    texts = {
+        key: vocabulary.texts(key)
+        for key in ("title", "note.hidden", "note.empty", "panel.hint", "legend", "button.reset", "button.print",
+                    "language")
+    }
+    texts["banner"] = vocabulary.texts("banner.shareable" if graph.shareable else "banner.private")
+    for status in STATUSES:
+        texts[f"status.{status}"] = vocabulary.texts(f"status.{status}")
+    texts["arrow_note"] = {
+        lang: vocabulary.text("arrow_note", lang).format(
+            types=f"{', '.join(DIRECTED_TYPES[:-1])} {vocabulary.text('and', lang)} {DIRECTED_TYPES[-1]}"
+        )
+        for lang in LANGUAGES
+    }
+    return texts
 
 
 # --- SVG ---------------------------------------------------------------------------------------
 
 
-def render_svg(graph: Graph, layout: Layout) -> str:
+def render_svg(graph: Graph, layout: Layout, title: str) -> str:
     """Самодостаточный SVG: стили связей — атрибуты, стрелки — в собственных <defs>, поэтому
     он выглядит так же внутри <img>."""
     routes = route(graph, layout)
@@ -82,7 +96,7 @@ def render_svg(graph: Graph, layout: Layout) -> str:
     parts = [
         (
             f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" '
-            f'width="{width}" height="{height}" font-family="sans-serif" role="img" aria-label="{TITLE}">'
+            f'width="{width}" height="{height}" font-family="sans-serif" role="img" aria-label="{_attr(title)}">'
         ),
         _svg_markers(),
         f'<rect width="{width}" height="{height}" fill="#ffffff"/>',
@@ -182,30 +196,61 @@ def _attr(text: str) -> str:
 # --- HTML --------------------------------------------------------------------------------------
 
 
-def render_html(graph: Graph, svg: str) -> str:
-    """Страница без внешних ресурсов: SVG, панель сведений, легенда, данные панели в JSON."""
-    canvas = svg if graph.nodes else f'<p class="empty">{EMPTY_NOTE}</p>'
+def render_html(graph: Graph, svg: str, texts: PageTexts, lang: str) -> str:
+    """Страница без внешних ресурсов: SVG, панель сведений, легенда, данные панели и тексты
+    страницы на всех языках в JSON. Разметка уже на языке lang; переключатель меняет её тексты."""
+    canvas = svg if graph.nodes else f'<p class="empty" data-i18n="note.empty">{_text(texts, "note.empty", lang)}</p>'
     return _PAGE.format(
-        **_header(graph),
+        **_header(graph, texts, lang),
         style=_STYLE,
         canvas=canvas,
-        legend=_legend(),
-        data=_tree_data(graph),
+        hint=_text(texts, "panel.hint", lang),
+        legend_title=_text(texts, "legend", lang),
+        legend=_legend(texts, lang),
+        reset=_text(texts, "button.reset", lang),
+        print=_text(texts, "button.print", lang),
+        language=_text(texts, "language", lang),
+        switch=_language_switch(lang),
+        texts=_json_script({"lang": lang, "texts": texts}),
+        data=_json_script(_tree_data(graph)),
         script=_SCRIPT,
     )
 
 
-def _header(graph: Graph) -> dict[str, str]:
-    """Заголовок, режим и баннер — общие для интерактивной страницы и страницы печати."""
-    return {"title": TITLE, "mode": "shareable" if graph.shareable else "private", "banner": _attr(banner(graph))}
+def _text(texts: PageTexts, key: str, lang: str) -> str:
+    """Текст для разметки, экранированный для HTML."""
+    return _attr(texts[key][lang])
 
 
-def _legend() -> str:
+def _header(graph: Graph, texts: PageTexts, lang: str) -> dict[str, str]:
+    """Язык, заголовок, режим и баннер — общие для интерактивной страницы и страницы печати."""
+    return {
+        "lang": lang,
+        "title": _text(texts, "title", lang),
+        "mode": "shareable" if graph.shareable else "private",
+        "banner": _text(texts, "banner", lang),
+    }
+
+
+# Названия языков на самих языках: их не переводят.
+_LANGUAGE_NAMES = {"ru": "Русский", "uk": "Українська", "en": "English"}
+
+
+def _language_switch(lang: str) -> str:
+    return "".join(
+        f'<button type="button" data-lang="{code}" lang="{code}" aria-pressed="{str(code == lang).lower()}">'
+        f"{_LANGUAGE_NAMES[code]}</button>"
+        for code in LANGUAGES
+    )
+
+
+def _legend(texts: PageTexts, lang: str) -> str:
     items = (
-        f"<li>{_line_sample(_ENCODINGS[status])} <code>{status}</code> — {_ENCODINGS[status].meaning}</li>"
+        f"<li>{_line_sample(_ENCODINGS[status])} <code>{status}</code> — "
+        f'<span data-i18n="status.{status}">{_text(texts, f"status.{status}", lang)}</span></li>'
         for status in STATUSES
     )
-    return "<ul>" + "".join(items) + f"</ul><p>{_ARROW_NOTE}</p>"
+    return "<ul>" + "".join(items) + f'</ul><p data-i18n="arrow_note">{_text(texts, "arrow_note", lang)}</p>'
 
 
 def _line_sample(encoding: _Encoding) -> str:
@@ -216,25 +261,29 @@ def _line_sample(encoding: _Encoding) -> str:
     )
 
 
-def _tree_data(graph: Graph) -> str:
-    """JSON для панели; <, > и & записаны JSON-escape, чтобы текст не закрыл <script>."""
-    data = {
+def _tree_data(graph: Graph) -> dict:
+    """Данные панели без языка: у скрытого лица вместо текста пометка, текст берёт скрипт."""
+    return {
         "nodes": {node.person_id: _node_data(node) for node in graph.nodes},
         "edges": {edge.relationship_id: {"title": edge.label, "fields": edge.fields} for edge in graph.edges},
     }
-    text = json.dumps(data, ensure_ascii=False)
-    return text.replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
 
 
 def _node_data(node: Node) -> dict:
     data: dict = {"title": node.label, "fields": node.fields}
     if node.hidden:
-        data["note"] = HIDDEN_NOTE
+        data["note"] = "hidden"
     return data
 
 
+def _json_script(data: object) -> str:
+    """JSON для <script>; <, > и & записаны JSON-escape, чтобы текст не закрыл <script>."""
+    text = json.dumps(data, ensure_ascii=False)
+    return text.replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
+
+
 _PAGE = """<!DOCTYPE html>
-<html lang="ru">
+<html lang="{lang}">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -243,16 +292,18 @@ _PAGE = """<!DOCTYPE html>
 </head>
 <body>
 <header>
-<h1>{title}</h1>
-<p class="banner {mode}">{banner}</p>
+<nav class="controls" aria-label="{language}" data-i18n-aria="language">{switch}
+<button type="button" id="print" data-i18n="button.print">{print}</button></nav>
+<h1 data-i18n="title">{title}</h1>
+<p class="banner {mode}" data-i18n="banner">{banner}</p>
 </header>
 <main>
 <div id="canvas">{canvas}</div>
-<aside id="panel"><p>Нажмите на лицо или связь, чтобы увидеть сведения. Колесо мыши — масштаб,
-перетаскивание — сдвиг.</p></aside>
+<aside id="panel"><p data-i18n="panel.hint">{hint}</p></aside>
 </main>
-<section class="legend"><h2>Легенда</h2>{legend}
-<button type="button" id="reset">Исходный вид</button></section>
+<section class="legend"><h2 data-i18n="legend">{legend_title}</h2>{legend}
+<button type="button" id="reset" data-i18n="button.reset">{reset}</button></section>
+<script type="application/json" id="i18n">{texts}</script>
 <script type="application/json" id="tree-data">{data}</script>
 <script>{script}</script>
 </body>
@@ -287,24 +338,77 @@ g.edge.selected text { font-weight: bold; fill: #1565c0; }
 #panel dd { margin: 0; overflow-wrap: anywhere; }
 .legend ul { list-style: none; padding: 0; }
 .legend li { margin: 4px 0; }
+.controls { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; margin-bottom: 8px; }
+.controls button[aria-pressed="true"] { font-weight: bold; }
 @media (max-width: 720px) { main { flex-direction: column; } #panel { flex-basis: auto; height: auto; } }
+@media print {
+  @page { size: A4; margin: 12mm; }
+  body { padding: 0; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  .controls, #panel, #reset { display: none; }
+  main { display: block; }
+  #canvas { height: auto; overflow: visible; }
+  #canvas svg { height: auto; max-height: 175mm; }
+  .legend { break-inside: avoid; font-size: 12px; }
+}
 """
 )
 
-# Щелчок по лицу или связи — панель из #tree-data; колесо — масштаб, перетаскивание — сдвиг
-# (меняется viewBox). Без сети и библиотек.
+# Язык: ?lang= в адресе, иначе прошлый выбор читателя (localStorage; заблокирован — без него),
+# иначе язык сборки; переключатель меняет тексты с data-i18n и aria-label с data-i18n-aria.
+# Кнопка PDF открывает печать браузера. Щелчок по лицу или связи — панель из #tree-data; колесо —
+# масштаб, перетаскивание — сдвиг (меняется viewBox). Без сети и библиотек.
 _SCRIPT = """
 (function () {
   "use strict";
+  var i18n = JSON.parse(document.getElementById("i18n").textContent);
   var data = JSON.parse(document.getElementById("tree-data").textContent);
   var panel = document.getElementById("panel");
   var svg = document.querySelector("#canvas svg");
+  var lang = i18n.lang;
+  var selected = null;
+  var STORE = "kinship-tree-lang";
+
+  function t(key) { return i18n.texts[key][lang]; }
+
+  function each(selector, action) {
+    Array.prototype.forEach.call(document.querySelectorAll(selector), action);
+  }
+
+  function setLanguage(code) {
+    if (!Object.prototype.hasOwnProperty.call(i18n.texts.title, code)) { return; }
+    lang = code;
+    document.documentElement.lang = code;
+    document.title = t("title");
+    each("[data-i18n]", function (element) { element.textContent = t(element.getAttribute("data-i18n")); });
+    each("[data-i18n-aria]", function (element) {
+      element.setAttribute("aria-label", t(element.getAttribute("data-i18n-aria")));
+    });
+    each("[data-lang]", function (button) {
+      button.setAttribute("aria-pressed", String(button.getAttribute("data-lang") === code));
+    });
+    if (svg) { svg.setAttribute("aria-label", t("title")); }
+    if (selected) { show(selected); }
+  }
+
+  function stored() {
+    try { return window.localStorage.getItem(STORE); } catch (error) { return null; }
+  }
+
+  each("[data-lang]", function (button) {
+    button.addEventListener("click", function () {
+      var code = button.getAttribute("data-lang");
+      setLanguage(code);
+      try { window.localStorage.setItem(STORE, code); } catch (error) { /* хранилище заблокировано */ }
+    });
+  });
+  setLanguage(new URLSearchParams(window.location.search).get("lang") || stored() || lang);
+  document.getElementById("print").addEventListener("click", function () { window.print(); });
+
   if (!svg) { return; }
   var initial = svg.getAttribute("viewBox");
   var view = initial.split(" ").map(Number);
   var drag = null;
   var dragged = false;
-  var selected = null;
 
   function apply() { svg.setAttribute("viewBox", view.join(" ")); }
 
@@ -332,7 +436,7 @@ _SCRIPT = """
     group.classList.add("selected");
     panel.textContent = "";
     add(panel, "h2", item.title);
-    if (item.note) { add(panel, "p", item.note, "note"); }
+    if (item.note === "hidden") { add(panel, "p", t("note.hidden"), "note"); }
     var list = add(panel, "dl", "");
     item.fields.forEach(function (pair) {
       add(list, "dt", pair[0]);
@@ -386,10 +490,12 @@ _SCRIPT = """
     view[3] *= factor;
     apply();
   }, { passive: false });
-  document.getElementById("reset").addEventListener("click", function () {
+  function reset() {
     view = initial.split(" ").map(Number);
     apply();
-  });
+  }
+  document.getElementById("reset").addEventListener("click", reset);
+  window.addEventListener("beforeprint", reset);  // на листе — весь граф
 })();
 """
 
@@ -397,29 +503,30 @@ _SCRIPT = """
 # --- Страница печати (PDF) -----------------------------------------------------------------------
 
 
-def render_print_page(graph: Graph, svg: str) -> str:
+def render_print_page(graph: Graph, svg: str, texts: PageTexts, lang: str) -> str:
     """Статичная страница для build_pdf.print_pdf: заголовок, баннер, граф и легенда на первой
     странице. Только теги из build_pdf.STATIC_TAGS; граф и образцы линий — SVG в <img> с адресом
     data:, поэтому текст реестров не попадает в разметку и не похож на незаполненный <…>."""
     if graph.nodes:
-        canvas = f'<img class="graph" src="{_svg_data_uri(svg)}" alt="{TITLE}">'
+        canvas = f'<img class="graph" src="{_svg_data_uri(svg)}" alt="{_text(texts, "title", lang)}">'
     else:
-        canvas = f"<p>{EMPTY_NOTE}</p>"
+        canvas = f"<p>{_text(texts, 'note.empty', lang)}</p>"
     return _PRINT_PAGE.format(
-        **_header(graph),
+        **_header(graph, texts, lang),
         style=_PRINT_STYLE,
         canvas=canvas,
-        legend=_print_legend(),
+        legend_title=_text(texts, "legend", lang),
+        legend=_print_legend(texts, lang),
     )
 
 
-def _print_legend() -> str:
+def _print_legend(texts: PageTexts, lang: str) -> str:
     rows = (
         f'<tr><td><img src="{_svg_data_uri(_line_sample(_ENCODINGS[status]))}" alt=""></td>'
-        f"<td><code>{status}</code></td><td>{_ENCODINGS[status].meaning}</td></tr>"
+        f"<td><code>{status}</code></td><td>{_text(texts, f'status.{status}', lang)}</td></tr>"
         for status in STATUSES
     )
-    return "<table>" + "".join(rows) + f"</table><p>{_ARROW_NOTE}</p>"
+    return "<table>" + "".join(rows) + f"</table><p>{_text(texts, 'arrow_note', lang)}</p>"
 
 
 def _svg_data_uri(svg: str) -> str:
@@ -427,7 +534,7 @@ def _svg_data_uri(svg: str) -> str:
 
 
 _PRINT_PAGE = """<!DOCTYPE html>
-<html lang="ru">
+<html lang="{lang}">
 <head>
 <meta charset="utf-8">
 <title>{title}</title>
@@ -437,7 +544,7 @@ _PRINT_PAGE = """<!DOCTYPE html>
 <h1>{title}</h1>
 <p class="banner {mode}">{banner}</p>
 {canvas}
-<section class="legend"><h2>Легенда</h2>{legend}</section>
+<section class="legend"><h2>{legend_title}</h2>{legend}</section>
 </body>
 </html>
 """
@@ -475,10 +582,10 @@ _MERMAID_ENTITIES = {
 }
 
 
-def render_mermaid(graph: Graph) -> str:
+def render_mermaid(graph: Graph, texts: PageTexts, lang: str) -> str:
     """flowchart TB: узлы n1… по person_id, по строке на связь, цвет и штрих — linkStyle."""
     node_ids = {node.person_id: f"n{index}" for index, node in enumerate(graph.nodes, start=1)}
-    lines = [f"%% {banner(graph)}", "flowchart TB"]
+    lines = [f"%% {texts['banner'][lang]}", "flowchart TB"]
     for node in graph.nodes:
         label = _mermaid_text(node.label)
         if node.years:
@@ -503,10 +610,10 @@ def _mermaid_text(text: str) -> str:
 # --- DOT ---------------------------------------------------------------------------------------
 
 
-def render_dot(graph: Graph) -> str:
+def render_dot(graph: Graph, texts: PageTexts, lang: str) -> str:
     """digraph: по строке на лицо и на связь; dir=none у связей без стрелки."""
     lines = [
-        f"// {banner(graph)}",
+        f"// {texts['banner'][lang]}",
         "digraph tree {",
         '    graph [rankdir=TB, fontname="sans-serif"];',
         '    node [shape=box, style=rounded, fontname="sans-serif"];',

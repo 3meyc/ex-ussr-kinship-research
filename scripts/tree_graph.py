@@ -11,19 +11,23 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import shlex
 import sys
 import tempfile
 from collections.abc import Mapping, Sequence
 from datetime import date
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from audit_evidence import Register, audit_registers, load_registers, plural_ru
 from build_pdf import find_chrome, print_pdf
 from research_common import atomic_bytes
+from tree_i18n import LANGUAGES, LanguageChoice, choose_language, load_vocabulary
 from tree_layout import layout
 from tree_model import Graph, IdConflictError, build_graph
 from tree_render import (
+    page_texts,
     render_dot,
     render_html,
     render_mermaid,
@@ -31,10 +35,15 @@ from tree_render import (
     render_svg,
 )
 
+if TYPE_CHECKING:
+    from tree_render import PageTexts
+
 EXIT_AUDIT_ERRORS = 1
 EXIT_NO_CASE = 2
 EXIT_NO_PDF = 3
 _ERRORS_SHOWN = 5
+# Ключ верхнего уровня анкеты дела; YAML целиком не разбирается (скрипты навыка — только stdlib).
+_REQUESTED_LANGUAGE = re.compile(r"""^requested_output_language:[ \t]*["']?([^"'#\s]*)""", re.MULTILINE)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -65,14 +74,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     # Прежний передаваемый PDF не совпадает с новым графом; его не должны отправить по ошибке, даже
     # если сборка прервётся, поэтому он удаляется до записи новых файлов.
     stale_pdf_removed = graph.shareable and _remove(pdf_path)
-    svg = render_svg(graph, layout(graph))
-    written = _write_outputs(out_dir, stem, _render(graph, svg))
-    pdf_built = not args.no_pdf and _build_pdf(args.chrome, render_print_page(graph, svg), pdf_path)
+    choice = choose_language(args.lang, _requested_language(case_dir))
+    lang = choice.lang
+    texts = page_texts(load_vocabulary(), graph)
+    svg = render_svg(graph, layout(graph), texts["title"][lang])
+    written = _write_outputs(out_dir, stem, _render(graph, svg, texts, lang))
+    pdf_built = not args.no_pdf and _build_pdf(args.chrome, render_print_page(graph, svg, texts, lang), pdf_path)
     if pdf_built:
         written.append(pdf_path)
     elif stale_pdf_removed:
         print(f"Удалён устаревший PDF: {pdf_path}", file=sys.stdout if args.no_pdf else sys.stderr)
-    _report_build(written, graph, warnings=len(audit["warnings"]))
+    _report_build(written, graph, choice, warnings=len(audit["warnings"]))
     return 0 if pdf_built or args.no_pdf else EXIT_NO_PDF
 
 
@@ -85,6 +97,11 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         help="Вид для передачи: живые лица показаны только person_id (папка tree/share/)",
     )
     parser.add_argument("--no-pdf", action="store_true", help="Не строить PDF")
+    parser.add_argument(
+        "--lang",
+        choices=LANGUAGES,
+        help="Язык подписей страниц и PDF; без него — requested_output_language анкеты дела, иначе ru",
+    )
     parser.add_argument(
         "--chrome",
         help="Файл браузера для PDF; иной путь — браузера нет. Без него: CHROME_PATH, затем поиск",
@@ -119,6 +136,16 @@ def _report_id_conflicts(error: IdConflictError) -> None:
     )
 
 
+def _requested_language(case_dir: Path) -> str | None:
+    """requested_output_language из case-intake.yaml; нет файла или ключа — None."""
+    try:
+        text = (case_dir / "case-intake.yaml").read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    match = _REQUESTED_LANGUAGE.search(text)
+    return match.group(1) if match else None
+
+
 def _build_graph(registers: Mapping[str, Register], *, shareable: bool) -> Graph:
     """Граф из тех же строк реестров, что прошли аудит."""
     return build_graph(
@@ -129,9 +156,13 @@ def _build_graph(registers: Mapping[str, Register], *, shareable: bool) -> Graph
     )
 
 
-def _render(graph: Graph, svg: str) -> dict[str, str]:
+def _render(graph: Graph, svg: str, texts: PageTexts, lang: str) -> dict[str, str]:
     """Тексты выходных файлов по расширению."""
-    return {".html": render_html(graph, svg), ".mmd": render_mermaid(graph), ".dot": render_dot(graph)}
+    return {
+        ".html": render_html(graph, svg, texts, lang),
+        ".mmd": render_mermaid(graph, texts, lang),
+        ".dot": render_dot(graph, texts, lang),
+    }
 
 
 def _remove(path: Path) -> bool:
@@ -153,10 +184,13 @@ def _write_outputs(out_dir: Path, stem: str, texts: Mapping[str, str]) -> list[P
     return written
 
 
-def _report_build(written: Sequence[Path], graph: Graph, *, warnings: int) -> None:
+def _report_build(written: Sequence[Path], graph: Graph, choice: LanguageChoice, *, warnings: int) -> None:
     print("Записано:")
     for path in written:
         print(f"  {path}")
+    print(f"Язык подписей: {choice.lang}")
+    if choice.ignored is not None:
+        print(f"requested_output_language {choice.ignored!r} — не ru, uk и не en; подписи на {choice.lang}")
     print(f"лица: {len(graph.nodes)}, связи: {len(graph.edges)}, скрыто живых: {graph.hidden_count}")
     if graph.skipped_rows:
         print(f"Не показано строк реестров с пустым person_id или relationship_id: {graph.skipped_rows}")

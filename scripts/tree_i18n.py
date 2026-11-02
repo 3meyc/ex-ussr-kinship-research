@@ -13,7 +13,9 @@ from typing import NamedTuple
 
 LANGUAGES = ("ru", "uk", "en")
 DEFAULT_LANGUAGE = "ru"
-VOCABULARY_PATH = Path(__file__).resolve().parent.parent / "assets" / "i18n" / "tree.json"
+VOCABULARY_PATH = (
+    Path(__file__).resolve().parent.parent / "assets" / "i18n" / "tree.json"
+)
 
 
 @dataclass(frozen=True)
@@ -35,7 +37,9 @@ def load_vocabulary(path: Path = VOCABULARY_PATH) -> Vocabulary:
     entries = json.loads(path.read_text(encoding="utf-8"))
     incomplete = [key for key, texts in entries.items() if not _complete(texts)]
     if incomplete:
-        raise ValueError(f"{path}: нет текста на {', '.join(LANGUAGES)} у ключей: {', '.join(incomplete)}")
+        raise ValueError(
+            f"{path}: нет текста на {', '.join(LANGUAGES)} у ключей: {', '.join(incomplete)}"
+        )
     return Vocabulary(entries)
 
 

@@ -17,7 +17,10 @@ from tree_i18n import LanguageChoice, choose_language, load_vocabulary
 class VocabularyFile(unittest.TestCase):
     def test_shipped_vocabulary_has_every_language(self):
         vocabulary = load_vocabulary()  # raises if a key misses ru, uk or en
-        self.assertEqual(vocabulary.texts("legend"), {"ru": "Легенда", "uk": "Легенда", "en": "Legend"})
+        self.assertEqual(
+            vocabulary.texts("legend"),
+            {"ru": "Легенда", "uk": "Легенда", "en": "Legend"},
+        )
 
     def test_key_without_a_language_or_with_empty_text_is_refused(self):
         entries = {
@@ -41,7 +44,10 @@ class BuildLanguage(unittest.TestCase):
         cases = {
             "--lang wins over the intake": (("uk", "en"), LanguageChoice("uk", None)),
             "intake language": ((None, "en"), LanguageChoice("en", None)),
-            "intake with region and case": ((None, "UK-ua"), LanguageChoice("uk", None)),
+            "intake with region and case": (
+                (None, "UK-ua"),
+                LanguageChoice("uk", None),
+            ),
             "no intake value": ((None, None), LanguageChoice("ru", None)),
             "empty intake value": ((None, " "), LanguageChoice("ru", None)),
             "auto falls back to ru": ((None, "auto"), LanguageChoice("ru", "auto")),

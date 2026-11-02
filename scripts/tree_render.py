@@ -375,7 +375,7 @@ _SCRIPT = """
   }
 
   function setLanguage(code) {
-    if (!Object.prototype.hasOwnProperty.call(i18n.texts.title, code)) { return; }
+    if (!code || !Object.prototype.hasOwnProperty.call(i18n.texts.title, code)) { return false; }
     lang = code;
     document.documentElement.lang = code;
     document.title = t("title");
@@ -388,6 +388,7 @@ _SCRIPT = """
     });
     if (svg) { svg.setAttribute("aria-label", t("title")); }
     if (selected) { show(selected); }
+    return true;
   }
 
   function stored() {
@@ -401,7 +402,9 @@ _SCRIPT = """
       try { window.localStorage.setItem(STORE, code); } catch (error) { /* хранилище заблокировано */ }
     });
   });
-  setLanguage(new URLSearchParams(window.location.search).get("lang") || stored() || lang);
+  // Неизвестный ?lang= не отменяет прошлый выбор; неизвестный сохранённый — язык сборки.
+  var requested = new URLSearchParams(window.location.search).get("lang");
+  if (!setLanguage(requested)) { setLanguage(stored()); }
   document.getElementById("print").addEventListener("click", function () { window.print(); });
 
   if (!svg) { return; }

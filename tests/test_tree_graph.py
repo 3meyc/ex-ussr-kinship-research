@@ -1181,6 +1181,25 @@ class Languages(CaseTestBase):
                 self.assertIn(repr(value), proc.stdout)
         self.assert_exit(self.run_tree("--no-pdf", "--lang", "de"), 2)
 
+    def test_intake_not_in_utf8_falls_back_without_failing(self):
+        self.write_fixture()
+        (self.case / "case-intake.yaml").write_bytes('requested_output_language: "en"  # язык\n'.encode("cp1251"))
+        self.build()
+        self.assertEqual(self.page_lang(), "ru")
+        self.build("--lang", "en")
+        self.assertEqual(self.page_lang(), "en")
+
+    def test_print_page_in_each_language(self):
+        graph = build_graph(PERSONS, RELATIONSHIPS, shareable=True, current_year=2026)
+        texts = page_texts(load_vocabulary(), graph)
+        for lang in LANGS:
+            with self.subTest(lang):
+                page = render_print_page(graph, render_svg(graph, layout(graph), texts["title"][lang]), texts, lang)
+                self.assertEqual(inspect_html(page, Path("tree.html")), ([], []))
+                self.assertIn(f'<html lang="{lang}">', page)
+                for key in ("title", "legend", "banner.shareable", "status.hypothesis"):
+                    self.assertIn(html.escape(VOCABULARY[key][lang], quote=True), page, key)
+
 
 if __name__ == "__main__":
     unittest.main()

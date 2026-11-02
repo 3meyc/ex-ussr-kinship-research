@@ -74,7 +74,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     # Прежний передаваемый PDF не совпадает с новым графом; его не должны отправить по ошибке, даже
     # если сборка прервётся, поэтому он удаляется до записи новых файлов.
     stale_pdf_removed = graph.shareable and _remove(pdf_path)
-    choice = choose_language(args.lang, _requested_language(case_dir))
+    choice = choose_language(args.lang, None if args.lang else _requested_language(case_dir))
     lang = choice.lang
     texts = page_texts(load_vocabulary(), graph)
     svg = render_svg(graph, layout(graph), texts["title"][lang])
@@ -137,10 +137,11 @@ def _report_id_conflicts(error: IdConflictError) -> None:
 
 
 def _requested_language(case_dir: Path) -> str | None:
-    """requested_output_language из case-intake.yaml; нет файла или ключа — None."""
+    """requested_output_language из case-intake.yaml; нет файла или ключа, файл не читается или не
+    в UTF-8 — None (тогда ru, и скрипт это печатает)."""
     try:
         text = (case_dir / "case-intake.yaml").read_text(encoding="utf-8")
-    except FileNotFoundError:
+    except (OSError, UnicodeDecodeError):
         return None
     match = _REQUESTED_LANGUAGE.search(text)
     return match.group(1) if match else None
